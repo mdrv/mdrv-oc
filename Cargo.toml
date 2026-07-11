@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# Cargo manifest for the `mdrv-oc` crate.
+#
+# Like `mdrv-inkscape`, this crate ships BOTH a library (`src/lib.rs`) AND a
+# binary (`mdrv-oc`, see `[[bin]]` below):
+#   - The library (`mdrv_oc`) is the reusable core: locate the OpenCode
+#     SQLite DB, read sessions/projects, and mutate a session's directory.
+#   - The binary is the thin CLI that wires `clap` argument parsing onto the
+#     library.
+# ---------------------------------------------------------------------------
+
+[package]
+name = "mdrv-oc"
+version = "0.1.0"
+edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
+rust-version = "1.85"     # MSRV — edition 2024 requires ≥ 1.85.
+authors = ["Umar Alfarouk <medrivia@gmail.com>"]
+license = "MIT"
+description = "Inspect and manipulate the OpenCode SQLite database (sessions, projects)"
+homepage = "https://github.com/mdrv/mdrv-oc"
+repository = "https://github.com/mdrv/mdrv-oc"
+readme = "README.md"
+keywords = ["opencode", "sqlite", "cli", "database", "session"]
+categories = ["command-line-utilities", "database"]
+exclude = ["claude.md", "docs/"]
+
+[lib]
+# `src/lib.rs` is the default library root; we state it explicitly for clarity.
+path = "src/lib.rs"
+
+# One binary, `mdrv-oc`, so users type `mdrv-oc session mv ...`.
+[[bin]]
+name = "mdrv-oc"
+path = "src/main.rs"
+
+[dependencies]
+# `clap` with the `derive` feature = define the CLI with plain Rust structs +
+# `#[derive(Parser)]` attributes. Mirrors `mdrv-ink`.
+clap = { version = "4.6.1", features = ["derive"] }
+
+# `rusqlite` = the standard Rust binding to SQLite. We enable `bundled` so the
+# build compiles its own SQLite (libsqlite3-sys) — no system libsqlite3 needed,
+# which makes the binary self-contained and the version predictable. OpenCode
+# runs its DB in WAL mode with foreign keys; we set the same pragmas on open.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# `serde` + `serde_json` = serialization for the `--json` / `--pretty` modes.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+# `anyhow` = ergonomic error type for application (binary) code. The library
+# keeps a narrow, typed error (`src/error.rs`); the binary uses `anyhow` so a
+# `?` bubbles context all the way to `main` and prints + exits non-zero.
+anyhow = "1.0.103"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"   # coloured diff output in failing tests
