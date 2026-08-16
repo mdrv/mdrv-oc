@@ -53,5 +53,10 @@ serde_json = "1.0.150"
 # `?` bubbles context all the way to `main` and prints + exits non-zero.
 anyhow = "1.0.103"
 
+# `zstd` = bindings to the C libzstd. Session exports compress to
+# `<id>.json.zst` by default (JSON shrinks 4-8x; level 3 runs at hundreds of
+# MB/s, so it is effectively free next to spawning the `opencode` child).
+zstd = "0.13"
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"   # coloured diff output in failing tests

@@ -49,6 +49,38 @@ pub fn list(db: &Db, limit: u32) -> Result<Vec<Session>> {
     Ok(out)
 }
 
+/// Case-insensitive substring search over `slug` and `title`, newest first —
+/// backs `session export --filter`. SQLite's `LIKE` is already ASCII
+/// case-insensitive, so no `lower()` juggling is needed.
+pub fn search(db: &Db, needle: &str, limit: u32) -> Result<Vec<Session>> {
+    let pattern = format!("%{}%", escape_like(needle));
+    let mut stmt = db.conn().prepare(
+        "SELECT id, project_id, parent_id, slug, directory, title,
+                time_created, time_updated
+         FROM session
+         WHERE slug LIKE ?1 ESCAPE '\\' OR title LIKE ?1 ESCAPE '\\'
+         ORDER BY time_updated DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![pattern, limit as i64], row_to_session)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Does a session with this exact id exist? Used by `session import` to flag
+/// re-imports before running them.
+pub fn exists(db: &Db, id: &str) -> Result<bool> {
+    let n: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM session WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Resolve a selector to exactly one session, or fail with `NotFound` /
 /// `Ambiguous`. Tries the most specific matcher first and stops at the first
 /// tier that yields results, so `ses_0b8dc33a7` (prefix) never falls through to

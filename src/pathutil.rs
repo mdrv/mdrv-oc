@@ -89,7 +89,9 @@ mod tests {
     #[test]
     fn expand_home_passes_through_plain_paths() {
         // SAFETY: tests are single-threaded; mutating HOME here is benign.
-        unsafe { std::env::set_var("HOME", "/home/test"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/test");
+        }
         assert_eq!(expand_home("/x/g/foo"), PathBuf::from("/x/g/foo"));
         assert_eq!(expand_home("relative/dir"), PathBuf::from("relative/dir"));
     }
@@ -97,14 +99,18 @@ mod tests {
     #[test]
     fn expand_home_tilde_alone() {
         // SAFETY: tests are single-threaded; mutating HOME here is benign.
-        unsafe { std::env::set_var("HOME", "/home/test"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/test");
+        }
         assert_eq!(expand_home("~"), PathBuf::from("/home/test"));
     }
 
     #[test]
     fn expand_home_tilde_slash() {
         // SAFETY: tests are single-threaded; mutating HOME here is benign.
-        unsafe { std::env::set_var("HOME", "/home/test"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/test");
+        }
         assert_eq!(
             expand_home("~/projects/x"),
             PathBuf::from("/home/test/projects/x")
@@ -114,7 +120,9 @@ mod tests {
     #[test]
     fn expand_home_other_user_left_alone() {
         // SAFETY: tests are single-threaded; mutating HOME here is benign.
-        unsafe { std::env::set_var("HOME", "/home/test"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/test");
+        }
         // `~root` is not supported; kept verbatim.
         assert_eq!(expand_home("~root/x"), PathBuf::from("~root/x"));
     }

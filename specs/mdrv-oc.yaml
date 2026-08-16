@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://carapace.sh/schemas/command.json
+name: mdrv-oc
+description: Inspect and manipulate the OpenCode SQLite database
+persistentflags:
+  -j, --json: Emit machine-readable JSON instead of human text
+  --pretty: Indented, pretty JSON (implies --json)
+  -q, --quiet: Suppress non-result commentary
+  --db=: Path to opencode.db
+completion:
+  flag:
+    db: ["$files"]
+commands:
+  - name: session
+    description: Inspect or modify sessions
+    commands:
+      - name: list
+        description: List sessions, newest first
+        flags:
+          --limit=: How many sessions to show
+      - name: show
+        description: Show one session (id, id prefix, slug, or title substring)
+        completion:
+          positional:
+            - ["$(mdrv-oc __complete sessions)"]
+      - name: move
+        aliases: [mv]
+        description: Change a session's directory (and optionally its project)
+        flags:
+          --project=: Also set session.project_id to this exact project id
+          --auto-project: Infer project_id from the new directory
+          --children: Also rewrite child sessions
+          -y, --yes: Skip the confirmation prompt
+          --no-backup: Skip the automatic db.bak backup
+          --dry-run: Print the planned change without writing
+        completion:
+          positional:
+            - ["$(mdrv-oc __complete sessions)"]
+            - ["$directories"]
+      - name: export
+        description: Export session(s) to portable JSON files via opencode export
+        flags:
+          --filter=: Export every session whose slug or title contains TEXT
+          --limit=: Cap how many sessions the menu or filter considers (0 = no cap)
+          --out=: Output directory for the session-id.json.zst files
+          --no-compress: Write plain session-id.json instead of .json.zst
+          --opencode-bin=: Path to the opencode binary to drive
+          -y, --yes: Skip the bulk confirmation prompt
+        completion:
+          flag:
+            out: ["$directories"]
+            opencode-bin: ["$executables"]
+          positionalany:
+            - "$(mdrv-oc __complete sessions)"
+      - name: import
+        description: Import session export file(s) via opencode import
+        flags:
+          -y, --yes: Skip the confirmation prompt
+          --no-backup: Skip the automatic db.bak backup
+          --opencode-bin=: Path to the opencode binary to drive
+        completion:
+          flag:
+            opencode-bin: ["$executables"]
+          positionalany:
+            - "$files([.json, .zst])"
+            - "$directories"
+  - name: project
+    description: Inspect projects
+    commands:
+      - name: list
+        description: List all known projects
+      - name: show
+        description: Show one project by exact id
+        completion:
+          positional:
+            - ["$(mdrv-oc __complete projects)"]

@@ -13,9 +13,9 @@ use std::path::Path;
 
 use rusqlite::params;
 
+use crate::Result;
 use crate::db::Db;
 use crate::model::Project;
-use crate::Result;
 
 /// Every project row, ordered by most-recently-touched. The table is small, so
 /// we don't bother paginating.

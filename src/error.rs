@@ -45,6 +45,10 @@ pub enum Error {
     /// The OpenCode data directory could not be located (no `HOME`, no
     /// `XDG_DATA_HOME`, and no `--db` override).
     DbNotFound { detail: String },
+
+    /// A wrapped `opencode` child process (`export`/`import`) exited non-zero.
+    /// `detail` carries the child's captured stderr/stdout for display.
+    External { cmd: String, detail: String },
 }
 
 impl fmt::Display for Error {
@@ -69,6 +73,13 @@ impl fmt::Display for Error {
             Error::InvalidInput { msg } => write!(f, "{msg}"),
             Error::DbNotFound { detail } => {
                 write!(f, "could not locate opencode.db: {detail}")
+            }
+            Error::External { cmd, detail } => {
+                write!(f, "command failed: {cmd}")?;
+                if !detail.is_empty() {
+                    write!(f, "\n{detail}")?;
+                }
+                Ok(())
             }
         }
     }
