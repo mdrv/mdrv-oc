@@ -99,12 +99,12 @@ mdrv-oc never serializes sessions itself).
   output file — don't pipe `opencode export` yourself.
 - Requires the `opencode` binary in `PATH` (override with `--opencode-bin`);
   a `--db` override is propagated to the child via `OPENCODE_DB`.
-- **OpenCode v2 note:** upstream v2 stores imported sessions in its own
-  `session_v2` store, which is not always mirrored into the legacy `session`
-  table that mdrv-oc reads. A freshly imported session may therefore not show
-  up in `mdrv-oc session list` right away — `opencode -s <id>` still resumes
-  it. Re-exporting it from the target device requires it to appear in
-  `session` first.
+- **OpenCode v2 note:** upstream v2 keeps sessions in its own `session_v2`
+  table and stops writing the legacy `session` one. mdrv-oc reads
+  `session_v2` whenever the table exists (v1 databases only have `session`),
+  so v2-era sessions — including fresh imports — are listed, resolvable, and
+  exportable. `session move` writes the active table and mirrors the change
+  into the legacy one when it still holds the row.
 - Not carried by the export format: todos, share URLs, pending inputs,
   `parent_id` linkage. None of these block continuing a session.
 

@@ -123,3 +123,20 @@ impl Db {
         Ok(())
     }
 }
+
+/// Name of the table holding sessions in this database: `session_v2` when
+/// OpenCode v2 has created it, else the legacy `session` table.
+///
+/// v2 migrates every legacy row into `session_v2` and then writes all NEW
+/// sessions (and imports) only there — the legacy table stops growing. So
+/// reading `session_v2` when it exists is a strict superset: nothing is
+/// lost and v2-era sessions stay visible.
+pub(crate) fn session_table(conn: &Connection) -> Result<&'static str> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'session_v2'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(if n > 0 { "session_v2" } else { "session" })
+}

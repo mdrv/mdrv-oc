@@ -55,7 +55,7 @@ jobs:
           arch="${TARGET%%-*}"
           mkdir -p "pkg/mdrv-oc" dist
           cp "target/$TARGET/release/mdrv-oc" pkg/mdrv-oc/
-          cp README.md specs/mdrv-oc.yaml pkg/mdrv-oc/
+          cp README.md LICENSE specs/mdrv-oc.yaml pkg/mdrv-oc/
           tar -czf "dist/mdrv-oc-${ver}-linux-${arch}.tar.gz" -C pkg mdrv-oc
       - uses: actions/upload-artifact@v7
         with:
@@ -88,7 +88,7 @@ jobs:
             $pkg = "pkg/mdrv-oc"
             New-Item -ItemType Directory -Force $pkg | Out-Null
             Copy-Item $exe $pkg/
-            Copy-Item README.md $pkg/
+            Copy-Item README.md, LICENSE $pkg/
             Compress-Archive -Path $pkg -DestinationPath "dist/mdrv-oc-$ver-windows-$arch.zip"
             Remove-Item -Recurse -Force pkg
           }
