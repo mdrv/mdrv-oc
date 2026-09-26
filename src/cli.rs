@@ -11,10 +11,11 @@
 // function → print the result.
 // ===========================================================================
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use mdrv_oc as oc;
@@ -131,12 +132,16 @@ pub enum SessionCommand {
         dry_run: bool,
     },
 
-    /// Export session(s) to portable JSON files via `opencode export`.
+    /// Export session(s) to portable JSON files via the `opencode` CLI.
     ///
     /// Pick sessions with selectors (id/prefix/slug/title), `--filter` (title
     /// or slug substring), or — with neither — an interactive multi-select
-    /// menu. One `<session-id>.json.zst` file is written per session into
-    /// --out (plain `.json` with --no-compress).
+    /// menu. Each session becomes one self-describing file in --out, named
+    /// `YYYY-MM-DD_<slug>_ses_<id8>.json[.zst]` (local-time session start;
+    /// plain `.json` with --no-compress, or a custom name via --name / the
+    /// interactive prompt). Re-exports converge: the out dir is indexed by
+    /// the session ids found inside the files, a newer session overwrites
+    /// its older copy, and equal/newer copies are skipped.
     Export {
         /// Session selector(s): id, id prefix, slug, or title substring.
         selectors: Vec<String>,
@@ -153,7 +158,12 @@ pub enum SessionCommand {
         #[arg(long, default_value = ".")]
         out: PathBuf,
 
-        /// Write plain `<id>.json` instead of zstd-compressed `<id>.json.zst`.
+        /// Custom file name (stem) for the export — single-session exports
+        /// only. Sanitized; `.json[.zst]` is appended automatically.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Write plain `.json` instead of zstd-compressed `.json.zst`.
         #[arg(long)]
         no_compress: bool,
 
@@ -166,19 +176,22 @@ pub enum SessionCommand {
         yes: bool,
     },
 
-    /// Import session export file(s) via `opencode import`.
+    /// Import session export file(s) via the `opencode` CLI.
     ///
-    /// Takes one or more export files or directories (a directory imports
-    /// every `*.json` / `*.json.zst` inside it). Plain `.json.zst` files
-    /// (magic-byte detected) are decompressed transparently. The imported
-    /// session keeps its id, so `opencode -s <id>` resumes it; like upstream
-    /// import, it is re-anchored to the project of the current working
-    /// directory.
+    /// Takes one or more export files or directories (a directory covers
+    /// every `*.json` / `*.json.zst` inside it). `.json.zst` files are
+    /// detected by magic bytes and decompressed transparently. The preview
+    /// dedupes multiple files of the same session (newest wins), flags
+    /// sessions already in the DB (stale re-imports are skipped by default),
+    /// and then asks which rows to import. The imported session keeps its
+    /// id, so `opencode -s <id>` resumes it; like upstream import, it is
+    /// re-anchored to the project of the current working directory.
     Import {
         /// Export file(s) or directory(ies) containing export files.
         files: Vec<PathBuf>,
 
-        /// Skip the confirmation prompt.
+        /// Skip the confirmation prompt (imports the recommended set: new
+        /// sessions plus files newer than the DB copy).
         #[arg(short = 'y', long)]
         yes: bool,
 
@@ -189,6 +202,18 @@ pub enum SessionCommand {
         /// Path to the opencode binary to drive.
         #[arg(long, default_value = "opencode")]
         opencode_bin: PathBuf,
+    },
+
+    /// Peek inside export file(s) or directory(ies) without importing.
+    ///
+    /// Prints what each `*.json[.zst]` export contains — session id, title,
+    /// working directory, start date and size — read straight from the
+    /// (transparently decompressed) file. `[in db]` flags sessions already
+    /// present in the local database. Handles both the v1 and the v2 export
+    /// layout, with no `opencode` subprocess and no DB writes.
+    Inspect {
+        /// Export file(s) or directory(ies) containing export files.
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -246,6 +271,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 filter,
                 limit,
                 out,
+                name,
                 no_compress,
                 opencode_bin,
                 yes,
@@ -257,6 +283,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 out,
                 !no_compress,
                 &opencode_bin,
+                name,
                 yes,
                 cli.quiet,
                 output,
@@ -275,6 +302,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 cli.quiet,
                 output,
             )?,
+            SessionCommand::Inspect { paths } => {
+                cmd_session_inspect(cli.db.as_deref(), paths, output)?
+            }
         },
         Command::Project { action } => match action {
             ProjectCommand::List => {
@@ -611,8 +641,13 @@ fn cmd_session_move(
 // ---------------------------------------------------------------------------
 
 /// `session export` — pick sessions (selectors → --filter → interactive menu),
-/// then loop `opencode export <id>` writing one `<id>.json.zst` per session
-/// (plain `<id>.json` when compression is disabled).
+/// then loop `opencode export <id>` writing one self-describing file per
+/// session into --out: `YYYY-MM-DD_<slug>_ses_<id8>.json[.zst]` (local-time
+/// session start, or a custom name via --name / the interactive prompt).
+///
+/// The out dir is indexed by the session ids found *inside* the existing
+/// files, so re-exports converge (newer wins) and forgotten copies of the
+/// same session — under any naming — are reported before writing.
 #[allow(clippy::too_many_arguments)]
 fn cmd_session_export(
     override_path: Option<&std::path::Path>,
@@ -622,6 +657,7 @@ fn cmd_session_export(
     out: PathBuf,
     compress: bool,
     bin: &std::path::Path,
+    name: Option<String>,
     yes: bool,
     quiet: bool,
     output: Output,
@@ -666,22 +702,62 @@ fn cmd_session_export(
         return Ok(());
     }
 
+    // --- custom naming ------------------------------------------------------
+    // `--name` is a single-session flag; batch naming happens interactively.
+    if name.is_some() && sessions.len() > 1 {
+        bail!(
+            "--name needs exactly one matching session ({} matched) — export \
+             them one by one, or rerun without --name and answer the \
+             interactive naming prompt",
+            sessions.len()
+        );
+    }
+    let single_name = match name.as_deref() {
+        Some(n) => Some(
+            oc::transfer::sanitize_name(n)
+                .with_context(|| format!("--name {n:?} sanitizes to an empty file name"))?,
+        ),
+        None => None,
+    };
+
     let out_dir = oc::pathutil::normalize_directory(&out.to_string_lossy())?;
+    std::fs::create_dir_all(&out_dir)?;
+
+    // --- index what the out dir already holds (by id inside the files) ------
+    let index = oc::transfer::index_export_dir(&out_dir)?;
+    if !quiet && !output.is_json() {
+        for (path, why) in &index.invalid {
+            eprintln!("note      : not indexed {}: {why}", path.display());
+        }
+    }
+    // File names already claimed on disk — collision checks and `-2` suffixes.
+    let mut taken: HashSet<String> = index
+        .entries()
+        .iter()
+        .filter_map(|e| e.path.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+
+    // --- interactive per-session naming (opt-in, batch only) ----------------
+    let interactive = sessions.len() > 1 && !yes && !output.is_json();
+    let mut customs: Vec<Option<String>> = vec![None; sessions.len()];
+    if interactive && ask_yes("custom file names? [y/N] ")? {
+        for (i, s) in sessions.iter().enumerate() {
+            let line = prompt_line(&format!(
+                "  name for {} ({}) [enter = default]: ",
+                s.slug, s.id
+            ))?;
+            customs[i] = line.as_deref().and_then(oc::transfer::sanitize_name);
+        }
+    }
 
     // --- confirm the batch --------------------------------------------------
-    if sessions.len() > 1 && !yes && !output.is_json() {
-        print!(
+    if interactive {
+        if !ask_yes(&format!(
             "export {} session(s) to {}? [y/N] ",
             sessions.len(),
             out_dir.display()
-        );
-        io::stdout().flush().ok();
-        let mut answer = String::new();
-        io::stdin()
-            .lock()
-            .read_line(&mut answer)
-            .context("reading confirmation")?;
-        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        ))? {
             println!("aborted.");
             return Ok(());
         }
@@ -694,11 +770,109 @@ fn cmd_session_export(
     }
 
     // --- run ----------------------------------------------------------------
+    let flavor = oc::transfer::detect_flavor(bin);
     let mut exported: Vec<oc::transfer::ExportOutcome> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
-    for s in &sessions {
-        match oc::transfer::export_session(bin, override_path, &s.id, &out_dir, compress) {
+    for (i, s) in sessions.iter().enumerate() {
+        // Remind the user when this session already has several copies here
+        // (any naming) — a forgotten earlier export is easy to miss.
+        let copies = index.all_for(&s.id);
+        if copies.len() >= 2 && !quiet && !output.is_json() {
+            let names: Vec<String> = copies
+                .iter()
+                .filter_map(|c| c.path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            println!(
+                "! existing : {} already exported here {}x: {}",
+                s.id,
+                copies.len(),
+                names.join(", ")
+            );
+        }
+
+        // File name: explicit --name (single session) > interactive name >
+        // dated default stem.
+        let stem = if sessions.len() == 1 {
+            single_name
+                .clone()
+                .unwrap_or_else(|| oc::transfer::default_export_stem(s))
+        } else {
+            customs[i]
+                .clone()
+                .unwrap_or_else(|| oc::transfer::default_export_stem(s))
+        };
+
+        // Newer-wins against what is already on disk.
+        let mut retire: Option<PathBuf> = None;
+        let dest: PathBuf =
+            match oc::transfer::decide_export(index.newest_for(&s.id), Some(s.time_updated)) {
+                oc::transfer::ExportDecision::SkipUpToDate(p) => {
+                    if !quiet && !output.is_json() {
+                        println!(
+                            "= up-to-date: {} — {} is already current",
+                            s.id,
+                            file_label(&p)
+                        );
+                    }
+                    skipped.push(serde_json::json!({
+                        "id": s.id, "file": p, "reason": "up-to-date"
+                    }));
+                    continue;
+                }
+                oc::transfer::ExportDecision::SkipStale(p) => {
+                    if !quiet && !output.is_json() {
+                        println!(
+                            "< skipped   : {} — {} is newer than the session row",
+                            s.id,
+                            file_label(&p)
+                        );
+                    }
+                    skipped.push(serde_json::json!({
+                        "id": s.id, "file": p, "reason": "existing-copy-newer"
+                    }));
+                    continue;
+                }
+                oc::transfer::ExportDecision::Overwrite(old) => {
+                    // Same session, same stem, current format; when the format
+                    // flipped (--no-compress or back) the old artifact is
+                    // retired once the new one is on disk.
+                    let stem_old = export_stem_of(&old);
+                    let dest = out_dir.join(oc::transfer::export_filename(&stem_old, compress));
+                    let flipped = dest != old;
+                    let old_label = file_label(&old);
+                    if flipped {
+                        retire = Some(old);
+                    }
+                    if !quiet && !output.is_json() {
+                        println!(
+                            "> overwrite : {} — {} is older{}",
+                            s.id,
+                            old_label,
+                            if flipped { " (format changed)" } else { "" }
+                        );
+                    }
+                    dest
+                }
+                oc::transfer::ExportDecision::Write => {
+                    let (unique, n) = oc::transfer::unique_stem(&stem, compress, &taken);
+                    if n > 1 && !quiet && !output.is_json() {
+                        println!(
+                            "! renamed   : {stem} is claimed by another export — using {unique}"
+                        );
+                    }
+                    let file_name = oc::transfer::export_filename(&unique, compress);
+                    taken.insert(file_name.clone());
+                    out_dir.join(file_name)
+                }
+            };
+
+        match oc::transfer::export_session(bin, override_path, &s.id, &dest, compress, flavor) {
             Ok(o) => {
+                if let Some(old) = retire {
+                    let _ = std::fs::remove_file(&old);
+                }
                 if !quiet && !output.is_json() {
                     if o.compressed {
                         println!(
@@ -732,7 +906,13 @@ fn cmd_session_export(
             .map(|(id, error)| serde_json::json!({ "id": id, "error": error }))
             .collect();
         output.emit(
-            &serde_json::json!({ "out": out_dir, "exported": exported, "failed": failed }),
+            &serde_json::json!({
+                "out": out_dir,
+                "opencode_flavor": if flavor == oc::transfer::OpenCodeFlavor::V2 { "v2" } else { "v1" },
+                "exported": exported,
+                "skipped": skipped,
+                "failed": failed,
+            }),
             || {},
         );
     } else if !failed.is_empty() {
@@ -740,15 +920,66 @@ fn cmd_session_export(
         bail!("{} of {} export(s) failed", failed.len(), sessions.len());
     } else if !quiet {
         println!(
-            "done     : {} file(s) in {}",
+            "done     : {} written, {} skipped, in {}",
             exported.len(),
+            skipped.len(),
             out_dir.display()
         );
     }
     Ok(())
 }
 
-/// `session import` — inspect export files, confirm, back up, then loop
+/// One row of the import preview: a peeked file plus its DB/duplicate status.
+#[derive(Debug)]
+struct ImportRow {
+    info: oc::transfer::ExportInfo,
+    status: RowStatus,
+}
+
+/// Why a row is (or is not) selected by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowStatus {
+    /// Not in the DB — selected by default.
+    New,
+    /// In the DB, file strictly newer — selected by default (refresh).
+    Refresh,
+    /// In the DB, file not newer than the DB copy — skipped by default.
+    UpToDate,
+    /// In the DB, file strictly older — skipped by default.
+    Stale,
+    /// Another row (same session id, newer file) supersedes this one.
+    Duplicate(usize), // 1-based row number of the kept copy
+}
+
+impl RowStatus {
+    fn default_selected(self) -> bool {
+        matches!(self, RowStatus::New | RowStatus::Refresh)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RowStatus::New => "[new]",
+            RowStatus::Refresh => "[newer — refresh]",
+            RowStatus::UpToDate => "[up-to-date]",
+            RowStatus::Stale => "[older — skip]",
+            RowStatus::Duplicate(_) => "[dup — skip]",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            RowStatus::New => "new",
+            RowStatus::Refresh => "refresh",
+            RowStatus::UpToDate => "up-to-date",
+            RowStatus::Stale => "stale",
+            RowStatus::Duplicate(_) => "duplicate",
+        }
+    }
+}
+
+/// `session import` — peek export files, dedupe same-session files to the
+/// newest, flag sessions already in the DB (stale re-imports are skipped by
+/// default), let the user pick rows, back up, then loop
 /// `opencode import <file>`. Invalid files are skipped with a warning.
 fn cmd_session_import(
     override_path: Option<&std::path::Path>,
@@ -767,55 +998,105 @@ fn cmd_session_import(
         bail!("no *.json / *.json.zst files found in the given path(s)");
     }
 
-    // --- inspect every candidate file --------------------------------------
-    let mut metas = Vec::new();
+    // --- peek every candidate file -----------------------------------------
+    let mut peeked: Vec<oc::transfer::ExportInfo> = Vec::new();
     let mut invalid: Vec<PathBuf> = Vec::new();
     for p in &paths {
-        match oc::transfer::inspect_import_file(p) {
-            Ok(m) => metas.push(m),
+        match oc::transfer::peek_export_file(p) {
+            Ok(m) => peeked.push(m),
             Err(e) => {
                 eprintln!("skipping {}: {e}", p.display());
                 invalid.push(p.clone());
             }
         }
     }
-    if metas.is_empty() {
+    if peeked.is_empty() {
         bail!("no importable export files among the given path(s)");
+    }
+
+    // --- dedupe by session id — the newest file wins ------------------------
+    // superseded[i]: None if peeked[i] is its session's kept copy, else the
+    // index of the copy that supersedes it.
+    let superseded = oc::transfer::dedupe_newest(&peeked);
+    // Winners get consecutive row numbers in file order; duplicates later
+    // point at their winner's row.
+    let mut row_of: HashMap<usize, usize> = HashMap::new();
+    let mut next_row = 1;
+    for (i, s) in superseded.iter().enumerate() {
+        if s.is_none() {
+            row_of.insert(i, next_row);
+            next_row += 1;
+        }
     }
 
     let db = open_db(override_path)?;
 
-    // Flag sessions that already exist so the user knows what a re-import
-    // means (upstream import refreshes rather than duplicates).
-    let mut entries: Vec<(oc::transfer::ImportMeta, bool)> = Vec::new();
-    for m in metas {
-        let exists = oc::session::exists(&db, &m.session_id)
-            .with_context(|| format!("checking for session {}", m.session_id))?;
-        entries.push((m, exists));
+    let mut rows: Vec<ImportRow> = Vec::with_capacity(peeked.len());
+    for (i, e) in peeked.iter().enumerate() {
+        let status = match superseded[i] {
+            None => {
+                let exists = oc::session::exists(&db, &e.session_id)
+                    .with_context(|| format!("checking for session {}", e.session_id))?;
+                if !exists {
+                    RowStatus::New
+                } else {
+                    let db_updated =
+                        oc::session::resolve(&db, &oc::SessionSelector::parse(&e.session_id))
+                            .with_context(|| format!("loading session {}", e.session_id))?
+                            .time_updated;
+                    match e.time_updated {
+                        Some(f) if f > db_updated => RowStatus::Refresh,
+                        Some(f) if f == db_updated => RowStatus::UpToDate,
+                        Some(_) => RowStatus::Stale,
+                        None => RowStatus::UpToDate, // file age unknown — don't clobber by default
+                    }
+                }
+            }
+            Some(k) => RowStatus::Duplicate(row_of[&k]),
+        };
+        rows.push(ImportRow {
+            info: e.clone(),
+            status,
+        });
     }
 
     // --- present the plan ---------------------------------------------------
-    let plan: Vec<serde_json::Value> = entries
+    let plan: Vec<serde_json::Value> = rows
         .iter()
-        .map(|(m, exists)| {
+        .enumerate()
+        .map(|(r, row)| {
             serde_json::json!({
-                "file": m.path,
-                "session_id": m.session_id,
-                "title": m.title,
-                "already_in_db": exists,
+                "row": r + 1,
+                "file": row.info.path,
+                "session_id": row.info.session_id,
+                "title": row.info.title,
+                "directory": row.info.directory,
+                "time_created": row.info.time_created,
+                "time_updated": row.info.time_updated,
+                "status": row.status.key(),
+                "default_selected": row.status.default_selected(),
             })
         })
         .collect();
     match output {
         Output::Human => {
-            println!("import {} session(s):", entries.len());
-            for (m, exists) in &entries {
+            println!("import {} session(s):", rows.len());
+            for (r, row) in rows.iter().enumerate() {
+                let date = row
+                    .info
+                    .time_created
+                    .or(row.info.time_updated)
+                    .map(fmt_date)
+                    .unwrap_or_else(|| "?".to_string());
                 println!(
-                    "  {id}  {title}{note} <- {file}",
-                    id = m.session_id,
-                    title = m.title.as_deref().unwrap_or(""),
-                    note = if *exists { "  [already in db]" } else { "" },
-                    file = m.path.display()
+                    "  {n:>3}) {date}  {id}  {title}  {dir}  {status} <- {file}",
+                    n = r + 1,
+                    date = date,
+                    id = row.info.session_id,
+                    title = row.info.title.as_deref().unwrap_or(""),
+                    dir = row.info.directory.as_deref().unwrap_or(""),
+                    status = row.status.label(),
+                    file = file_label(&row.info.path),
                 );
             }
             if !invalid.is_empty() {
@@ -828,19 +1109,52 @@ fn cmd_session_import(
         ),
     }
 
-    // --- confirm ------------------------------------------------------------
-    if !yes && !output.is_json() {
-        print!("run these imports? [y/N] ");
-        io::stdout().flush().ok();
-        let mut answer = String::new();
-        io::stdin()
-            .lock()
-            .read_line(&mut answer)
-            .context("reading confirmation")?;
-        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("aborted.");
-            return Ok(());
+    // --- select what to import ----------------------------------------------
+    // Default set: new sessions + files newer than their DB copy. Older
+    // copies, up-to-date copies and in-dir duplicates stay selectable by
+    // row number.
+    let default_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.status.default_selected())
+        .map(|(i, _)| i + 1)
+        .collect();
+    let chosen: Vec<usize> = if yes || output.is_json() {
+        default_rows.clone()
+    } else {
+        loop {
+            let line = prompt_line(&format!(
+                "import which? [y] recommended ({}), [all] everything ({}), [enter] cancel, or 1,3-5: ",
+                default_rows.len(),
+                rows.len()
+            ))?;
+            let Some(line) = line else {
+                println!("aborted.");
+                return Ok(());
+            };
+            let t = line.trim();
+            if t.is_empty() || t.eq_ignore_ascii_case("n") || t.eq_ignore_ascii_case("no") {
+                println!("aborted.");
+                return Ok(());
+            }
+            let lower = t.to_ascii_lowercase();
+            if matches!(lower.as_str(), "y" | "yes") {
+                break default_rows.clone();
+            }
+            // Anything else goes through the standard selection spec
+            // (which also covers all / a / *).
+            match oc::transfer::parse_selection_spec(t, rows.len()) {
+                Ok(v) => break v,
+                Err(e) => println!("  ({e})"),
+            }
         }
+    };
+
+    if chosen.is_empty() {
+        if !output.is_json() {
+            println!("nothing selected.");
+        }
+        return Ok(());
     }
 
     // --- backup (import mutates the DB via the child process) ---------------
@@ -855,24 +1169,26 @@ fn cmd_session_import(
     }
 
     // --- run ----------------------------------------------------------------
+    let flavor = oc::transfer::detect_flavor(bin);
     let mut imported: Vec<(String, PathBuf)> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
-    for (m, _) in &entries {
-        match oc::transfer::import_file(bin, override_path, &m.path) {
+    for r in &chosen {
+        let row = &rows[r - 1];
+        match oc::transfer::import_file(bin, override_path, &row.info.path, flavor) {
             Ok(msg) => {
                 let line = if msg.is_empty() {
-                    m.session_id.clone()
+                    row.info.session_id.clone()
                 } else {
                     msg
                 };
                 if !quiet && !output.is_json() {
-                    println!("ok       : {line} <- {}", m.path.display());
+                    println!("ok       : {line} <- {}", row.info.path.display());
                 }
-                imported.push((m.session_id.clone(), m.path.clone()));
+                imported.push((row.info.session_id.clone(), row.info.path.clone()));
             }
             Err(e) => {
-                eprintln!("failed   : {}: {e}", m.path.display());
-                failed.push((m.path.clone(), e.to_string()));
+                eprintln!("failed   : {}: {e}", row.info.path.display());
+                failed.push((row.info.path.clone(), e.to_string()));
             }
         }
     }
@@ -886,25 +1202,181 @@ fn cmd_session_import(
             .into_iter()
             .map(|(path, error)| serde_json::json!({ "file": path, "error": error }))
             .collect();
+        let not_selected: Vec<serde_json::Value> = rows
+            .iter()
+            .enumerate()
+            .filter(|(r, _)| !chosen.contains(&(r + 1)))
+            .map(|(r, row)| {
+                serde_json::json!({
+                    "row": r + 1,
+                    "file": row.info.path,
+                    "session_id": row.info.session_id,
+                    "reason": row.status.key(),
+                })
+            })
+            .collect();
         output.emit(
             &serde_json::json!({
                 "imported": imported,
                 "failed": failed,
                 "invalid_skipped": invalid,
+                "not_selected": not_selected,
             }),
             || {},
         );
     } else if !failed.is_empty() {
-        bail!("{} of {} import(s) failed", failed.len(), entries.len());
+        bail!("{} of {} import(s) failed", failed.len(), chosen.len());
     } else if !quiet {
         println!(
-            "done     : {} imported, {} failed, {} skipped",
+            "done     : {} imported, {} failed, {} not selected, {} invalid file(s) skipped",
             imported.len(),
             failed.len(),
+            rows.len() - chosen.len(),
             invalid.len()
         );
     }
     Ok(())
+}
+
+/// `session inspect` — peek inside export file(s)/dir(s) without importing:
+/// session id, title, working directory, start date, size, and whether the
+/// session already exists in the local DB. No DB writes, no `opencode`
+/// subprocess; handles both the v1 and the v2 export layout.
+fn cmd_session_inspect(
+    override_path: Option<&std::path::Path>,
+    paths: Vec<PathBuf>,
+    output: Output,
+) -> Result<()> {
+    if paths.is_empty() {
+        bail!("no files given");
+    }
+    let expanded = oc::transfer::expand_import_paths(&paths).context("expanding paths")?;
+    if expanded.is_empty() {
+        bail!("no *.json / *.json.zst files found in the given path(s)");
+    }
+
+    let mut infos: Vec<oc::transfer::ExportInfo> = Vec::new();
+    let mut invalid: Vec<PathBuf> = Vec::new();
+    for p in &expanded {
+        match oc::transfer::peek_export_file(p) {
+            Ok(i) => infos.push(i),
+            Err(e) => {
+                eprintln!("skipping {}: {e}", p.display());
+                invalid.push(p.clone());
+            }
+        }
+    }
+    if infos.is_empty() {
+        bail!("no readable export files among the given path(s)");
+    }
+
+    let db = open_db(override_path)?;
+    let mut in_db: HashMap<&str, bool> = HashMap::new();
+    for e in &infos {
+        in_db
+            .entry(e.session_id.as_str())
+            .or_insert_with(|| oc::session::exists(&db, &e.session_id).unwrap_or(false));
+    }
+
+    match output {
+        Output::Human => {
+            for e in &infos {
+                let date = e
+                    .time_created
+                    .or(e.time_updated)
+                    .map(fmt_date)
+                    .unwrap_or_else(|| "?".to_string());
+                println!(
+                    "{date}  {id}  {title}  {dir}  ({size}){db_mark}  <- {file}",
+                    date = date,
+                    id = e.session_id,
+                    title = e.title.as_deref().unwrap_or(""),
+                    dir = e.directory.as_deref().unwrap_or(""),
+                    size = fmt_size(e.size_bytes),
+                    db_mark = if in_db[e.session_id.as_str()] {
+                        "  [in db]"
+                    } else {
+                        ""
+                    },
+                    file = file_label(&e.path),
+                );
+            }
+            if !invalid.is_empty() {
+                println!("({} invalid file(s) skipped)", invalid.len());
+            }
+        }
+        other => {
+            let sessions: Vec<serde_json::Value> = infos
+                .iter()
+                .map(|e| {
+                    let mut v = serde_json::to_value(e).unwrap();
+                    v["in_db"] = serde_json::json!(in_db[e.session_id.as_str()]);
+                    v
+                })
+                .collect();
+            other.emit(
+                &serde_json::json!({ "sessions": sessions, "invalid": invalid }),
+                || {},
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// small interactive / formatting helpers
+// ---------------------------------------------------------------------------
+
+/// Print `prompt`, read one line, interpret it as the codebase's standard
+/// `[y/N]` answer. EOF (closed stdin) counts as "no".
+fn ask_yes(prompt: &str) -> Result<bool> {
+    Ok(match prompt_line(prompt)? {
+        Some(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        None => false,
+    })
+}
+
+/// Print `prompt` and read one line from stdin; `None` on EOF.
+fn prompt_line(prompt: &str) -> Result<Option<String>> {
+    print!("{prompt}");
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    let n = io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading input")?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line))
+}
+
+/// `12 B` / `34.1 KB` / `5.6 MB` — compact size for listings.
+fn fmt_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b < 1024.0 {
+        format!("{bytes} B")
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.1} KB", b / 1024.0)
+    } else {
+        format!("{:.1} MB", b / (1024.0 * 1024.0))
+    }
+}
+
+/// Last path segment, for compact listings.
+fn file_label(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Stem of an export file name: `x.json.zst` / `x.json` → `x`.
+fn export_stem_of(p: &std::path::Path) -> String {
+    let name = file_label(p);
+    name.strip_suffix(".json.zst")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(&name)
+        .to_string()
 }
 
 /// Interactive multi-select: print a numbered session list, then loop until the

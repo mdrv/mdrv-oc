@@ -58,5 +58,10 @@ anyhow = "1.0.103"
 # MB/s, so it is effectively free next to spawning the `opencode` child).
 zstd = "0.13"
 
+# `jiff` = timezone-correct date handling (by BurntSushi). Used for the
+# local-timezone `YYYY-MM-DD` prefix of export file names; on-screen date
+# display keeps the zero-dep UTC day math to stay byte-stable.
+jiff = "0.2"
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"   # coloured diff output in failing tests

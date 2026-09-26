@@ -14,10 +14,11 @@ row's `directory` (and optionally `project_id`) directly is the reliable
 workaround, and `mdrv-oc` makes it safe (backup + confirm by default).
 
 > **Warning — LLM-assisted project.** This codebase was generated with AI
-> assistance and has been tested against **OpenCode v1.17.x–1.18.x**. The SQLite
-> schema it relies on may change without notice. OpenCode v2 is on the horizon
-> and its schema is unknown at this time — this tool will almost certainly
-> break on a major version bump. Use at your own risk and always keep backups.
+> assistance and has been tested against **OpenCode v1.17.x–1.18.x and
+> v2.0.x**. The SQLite schema it relies on may change without notice; the
+> transfer subcommands are located automatically on both major versions
+> (`opencode export` on v1, `opencode session export` on v2). Use at your own
+> risk and always keep backups.
 
 ## Install
 
@@ -46,6 +47,10 @@ mdrv-oc session export mighty-wizard clever-garden --out ~/transfer
 mdrv-oc session export --filter "libhogweed" --out ~/transfer --yes
 mdrv-oc session export --out ~/transfer          # numbered menu: "1,3-5" or "all"
 
+# see what's inside the sync dir before importing (no DB writes)
+mdrv-oc session inspect /x/m/oc
+2026-09-22  ses_f5a323ad…  Implementasi awal chat app…  /x/g/ny26  (243.1 KB)  [in db]  <- 2026-09-22_clever-canyon_ses_f5a323ad.json.zst
+
 # import on the other device (from the project's directory!):
 cd /x/g/my-project && mdrv-oc session import ~/transfer --yes
 opencode -s ses_0b8dc33a7                        # resume where you left off
@@ -56,21 +61,36 @@ at a non-default database.
 
 ## Session transfer
 
-OpenCode v1.18 ships `opencode export <id>` / `opencode import <file>`, but only
-one session at a time. `mdrv-oc` wraps them for bulk transfer and keeps the
-format exactly what your installed `opencode` produces/expects (the schema
-drifts between versions, so mdrv-oc never serializes sessions itself).
+OpenCode ships one-session-at-a-time transfer commands, but only one at a time
+— and their location moved in v2 (`opencode export <id>` on v1.17–1.18,
+`opencode session export <id>` on v2; mdrv-oc detects which via `--version`).
+`mdrv-oc` wraps them for bulk transfer and keeps the format exactly what your
+installed `opencode` produces/expects (the schema drifts between versions, so
+mdrv-oc never serializes sessions itself).
 
-- **export** writes one `<session-id>.json.zst` (zstd) per session into `--out`
-  (default `.`) — session JSON compresses 4–8x. `--no-compress` writes plain
-  `<session-id>.json` instead. Pick sessions by selectors, `--filter TEXT`
-  (substring on slug/title, `--limit N` caps matches, `0` = no cap), or the
-  interactive menu.
-- **import** takes files _or_ directories (a directory imports every `*.json` /
+- **export** writes one self-describing file per session into `--out` (default
+  `.`), named `YYYY-MM-DD_<slug>_ses_<id8>.json.zst` — the session's _start_
+  date in your local timezone, its slug, and the first 8 chars of the id
+  (plain `.json` with `--no-compress`; session JSON compresses 4–8x). Custom
+  names: `--name "my-name"` on a single-session export, or answer
+  `custom file names?` in the interactive batch flow (empty = default).
+- **Re-exports converge.** The out dir is indexed by the session id found
+  _inside_ each file — file naming doesn't matter. A newer session overwrites
+  its older copy, an equal copy is reported `up-to-date` and skipped, and an
+  on-disk copy _newer_ than the DB row is kept. When one session already has
+  several copies under different names, all of them are listed as a reminder.
+- **import** takes files _or_ directories (a directory covers every `*.json` /
   `*.json.zst` inside). `.json.zst` files are detected by magic bytes and
-  decompressed transparently — no extra flags. Files that aren't valid exports
-  are skipped with a warning; sessions already in the DB are flagged
-  (re-import refreshes, it does not duplicate).
+  decompressed transparently — no extra flags. Invalid files are skipped with
+  a warning. The preview dedupes multiple files of the same session (newest
+  wins, others shown as `dup`), compares each against the DB (rows: `[new]`,
+  `[newer — refresh]` selected by default; `[up-to-date]`, `[older — skip]`,
+  `[dup — skip]` skipped by default), and asks `import which?` — answer `y`
+  for the recommended set, `all` for everything, or a row spec like `1,3-5`.
+- **inspect** — `mdrv-oc session inspect <file|dir>...` prints what each
+  export contains (date, id, title, working directory, size, `[in db]`) by
+  streaming only the `info` object out of the (transparently decompressed)
+  file. No DB writes, no `opencode` subprocess.
 - Like upstream import, an imported session is **re-anchored to the project of
   your current working directory** — the original machine's paths are ignored,
   so no path remapping is needed. Run the import from inside the project.
@@ -79,6 +99,12 @@ drifts between versions, so mdrv-oc never serializes sessions itself).
   output file — don't pipe `opencode export` yourself.
 - Requires the `opencode` binary in `PATH` (override with `--opencode-bin`);
   a `--db` override is propagated to the child via `OPENCODE_DB`.
+- **OpenCode v2 note:** upstream v2 stores imported sessions in its own
+  `session_v2` store, which is not always mirrored into the legacy `session`
+  table that mdrv-oc reads. A freshly imported session may therefore not show
+  up in `mdrv-oc session list` right away — `opencode -s <id>` still resumes
+  it. Re-exporting it from the target device requires it to appear in
+  `session` first.
 - Not carried by the export format: todos, share URLs, pending inputs,
   `parent_id` linkage. None of these block continuing a session.
 

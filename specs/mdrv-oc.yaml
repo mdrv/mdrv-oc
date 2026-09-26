@@ -37,29 +37,37 @@ commands:
             - ["$(mdrv-oc __complete sessions)"]
             - ["$directories"]
       - name: export
-        description: Export session(s) to portable JSON files via opencode export
+        description: Export session(s) as self-describing JSON files via opencode
         flags:
           --filter=: Export every session whose slug or title contains TEXT
           --limit=: Cap how many sessions the menu or filter considers (0 = no cap)
-          --out=: Output directory for the session-id.json.zst files
-          --no-compress: Write plain session-id.json instead of .json.zst
+          --out=: Output directory for the export files
+          --name=: Custom file name (stem) for a single-session export
+          --no-compress: Write plain .json instead of .json.zst
           --opencode-bin=: Path to the opencode binary to drive
           -y, --yes: Skip the bulk confirmation prompt
         completion:
           flag:
             out: ["$directories"]
+            name: [=]
             opencode-bin: ["$executables"]
           positionalany:
             - "$(mdrv-oc __complete sessions)"
       - name: import
         description: Import session export file(s) via opencode import
         flags:
-          -y, --yes: Skip the confirmation prompt
+          -y, --yes: Skip the confirmation prompt (imports the recommended set)
           --no-backup: Skip the automatic db.bak backup
           --opencode-bin=: Path to the opencode binary to drive
         completion:
           flag:
             opencode-bin: ["$executables"]
+          positionalany:
+            - "$files([.json, .zst])"
+            - "$directories"
+      - name: inspect
+        description: Peek inside export file(s) or directory(ies) without importing
+        completion:
           positionalany:
             - "$files([.json, .zst])"
             - "$directories"
