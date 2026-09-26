@@ -1,0 +1,115 @@
+# Release pipeline: build cross-platform binaries for a `v*` tag and attach
+# them to a GitHub Release. Layout mirrors mdrv/mdrv-ds: per-OS build jobs
+# upload artifacts, then one release job merges, checksums, and publishes.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Static musl builds: the binaries run on any distro regardless of
+        # glibc version. x86_64 uses the native musl host toolchain;
+        # aarch64 is cross-compiled via `cross` (Docker image ships the
+        # aarch64-musl gcc needed by the bundled C deps: sqlite3 + zstd).
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - target: x86_64-unknown-linux-musl
+            cross: false
+          - target: aarch64-unknown-linux-musl
+            cross: true
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools (native target)
+        if: ${{ !matrix.cross }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cross (aarch64 target)
+        if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target "$TARGET"
+          else
+            cargo build --release --target "$TARGET"
+          fi
+      - name: Package
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          arch="${TARGET%%-*}"
+          mkdir -p "pkg/mdrv-oc" dist
+          cp "target/$TARGET/release/mdrv-oc" pkg/mdrv-oc/
+          cp README.md specs/mdrv-oc.yaml pkg/mdrv-oc/
+          tar -czf "dist/mdrv-oc-${ver}-linux-${arch}.tar.gz" -C pkg mdrv-oc
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.target }}
+          path: dist/*
+
+  windows:
+    runs-on: windows-latest
+    env:
+      # Cross-compile the ARM64 slice from the x64 runner; the preinstalled
+      # MSVC toolchain ships the ARM64 cross components.
+      RUST_TARGETS: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - name: Build x86_64
+        run: cargo build --release
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v',''
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($arch in @('x86_64', 'aarch64')) {
+            $exe = if ($arch -eq 'x86_64') { 'target/release/mdrv-oc.exe' }
+                   else { 'target/aarch64-pc-windows-msvc/release/mdrv-oc.exe' }
+            $pkg = "pkg/mdrv-oc"
+            New-Item -ItemType Directory -Force $pkg | Out-Null
+            Copy-Item $exe $pkg/
+            Copy-Item README.md $pkg/
+            Compress-Archive -Path $pkg -DestinationPath "dist/mdrv-oc-$ver-windows-$arch.zip"
+            Remove-Item -Recurse -Force pkg
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-dist
+          path: dist/*
+
+  release:
+    if: ${{ !cancelled() && !failure() && startsWith(github.ref, 'refs/tags/') }}
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,19 @@
+# Fast checks on every push/PR: the test suite plus lint. Cross-platform
+# build coverage lives in release.yml (musl x86_64+aarch64, MSVC x86_64+aarch64).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo test --workspace
+      - run: cargo clippy --all-targets -- -D warnings
