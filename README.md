@@ -22,10 +22,23 @@ workaround, and `mdrv-oc` makes it safe (backup + confirm by default).
 
 ## Install
 
+From source:
+
 ```bash
 cargo install --path .
 # binary is `mdrv-oc`
 ```
+
+Arch Linux (mdrv/alarm repo, static binaries for `x86_64` and `aarch64`):
+
+```bash
+sudo pacman -S mdrv-oc
+```
+
+Other systems: grab a prebuilt archive from
+[GitHub releases](https://github.com/mdrv/mdrv-oc/releases) and verify it
+against `SHA256SUMS.txt`. Archives contain the binary plus this README and a
+[carapace](https://github.com/carapace-sh/carapace-bin) completion spec.
 
 ## Quick start
 
