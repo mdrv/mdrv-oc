@@ -37,7 +37,10 @@ sudo pacman -S mdrv-oc
 
 Other systems: grab a prebuilt archive from
 [GitHub releases](https://github.com/mdrv/mdrv-oc/releases) and verify it
-against `SHA256SUMS.txt`. Archives contain the binary plus this README and a
+against `SHA256SUMS.txt`. Assets are named
+`mdrv-oc-<version>-<rust-target>.tar.gz|zip` (e.g.
+`mdrv-oc-v0.2.0-aarch64-unknown-linux-musl.tar.gz`) and contain the binary
+plus this README and a
 [carapace](https://github.com/carapace-sh/carapace-bin) completion spec.
 
 ## Quick start
@@ -57,7 +60,7 @@ mdrv-oc session mv ses_0b8dc33a7
 
 # export sessions: selectors, --filter, or an interactive multi-select menu
 mdrv-oc session export mighty-wizard clever-garden --out ~/transfer
-mdrv-oc session export --filter "libhogweed" --out ~/transfer --yes
+mdrv-oc session export --filter "libhogweed" --yes        # --out falls back to $MDRV_OC_OUT
 mdrv-oc session export --out ~/transfer          # numbered menu: "1,3-5" or "all"
 
 # see what's inside the sync dir before importing (no DB writes)
@@ -67,6 +70,13 @@ mdrv-oc session inspect /x/m/oc
 # import on the other device (from the project's directory!):
 cd /x/g/my-project && mdrv-oc session import ~/transfer --yes
 opencode -s ses_0b8dc33a7                        # resume where you left off
+
+# ...or re-anchor without cd:
+mdrv-oc session import ~/transfer --into /x/g/my-project --yes
+
+# keep a synced directory converged (pull newer exports, push newer sessions):
+export MDRV_OC_OUT=/x/m/oc                       # set once in your shell profile
+mdrv-oc session sync /x/m/oc
 ```
 
 All commands take `--json` / `--pretty` / `--quiet`, and `--db <PATH>` to point
@@ -81,8 +91,8 @@ OpenCode ships one-session-at-a-time transfer commands, but only one at a time
 installed `opencode` produces/expects (the schema drifts between versions, so
 mdrv-oc never serializes sessions itself).
 
-- **export** writes one self-describing file per session into `--out` (default
-  `.`), named `YYYY-MM-DD_<slug>_ses_<id8>.json.zst` — the session's _start_
+- **export** writes one self-describing file per session into `--out`
+  (`$MDRV_OC_OUT` if set, else `.`), named `YYYY-MM-DD_<slug>_ses_<id8>.json.zst` — the session's _start_
   date in your local timezone, its slug, and the first 8 chars of the id
   (plain `.json` with `--no-compress`; session JSON compresses 4–8x). Custom
   names: `--name "my-name"` on a single-session export, or answer
@@ -100,18 +110,31 @@ mdrv-oc never serializes sessions itself).
   `[newer — refresh]` selected by default; `[up-to-date]`, `[older — skip]`,
   `[dup — skip]` skipped by default), and asks `import which?` — answer `y`
   for the recommended set, `all` for everything, or a row spec like `1,3-5`.
+- **sync** — `mdrv-oc session sync <dir>` runs the whole two-device loop in
+  one command: pull (import files newer than their DB copy) then push (export
+  sessions newer than their on-disk copy), with a combined preview and one
+  confirmation. Everything already converged is skipped, so re-running after
+  every sync is cheap. `--filter TEXT` limits the push side.
 - **inspect** — `mdrv-oc session inspect <file|dir>...` prints what each
   export contains (date, id, title, working directory, size, `[in db]`) by
   streaming only the `info` object out of the (transparently decompressed)
   file. No DB writes, no `opencode` subprocess.
 - Like upstream import, an imported session is **re-anchored to the project of
   your current working directory** — the original machine's paths are ignored,
-  so no path remapping is needed. Run the import from inside the project.
+  so no path remapping is needed. Run the import from inside the project, or
+  pass `--into <dir>` to re-anchor without `cd` (`session sync` keeps each
+  session in its own directory).
 - **Gotcha (v1.18.x):** `opencode export` truncates at exactly 128 KiB when its
   stdout is a pipe, so mdrv-oc redirects the child's stdout straight into the
   output file — don't pipe `opencode export` yourself.
 - Requires the `opencode` binary in `PATH` (override with `--opencode-bin`);
   a `--db` override is propagated to the child via `OPENCODE_DB`.
+- **Gotcha (v2 + running service):** if a global `opencode serve --service` is
+  running, upstream v2 `session import` (and other session subcommands) proxy
+  to that service, which uses the database it was started with and **ignores
+  `OPENCODE_DB`** — sandboxed `--db` imports then land in the service's
+  database. Stop the service for `--db`-based imports; the normal no-`--db`
+  flow is unaffected.
 - **OpenCode v2 note:** upstream v2 keeps sessions in its own `session_v2`
   table and stops writing the legacy `session` one. mdrv-oc reads
   `session_v2` whenever the table exists (v1 databases only have `session`),

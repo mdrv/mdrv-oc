@@ -51,12 +51,11 @@ jobs:
           fi
       - name: Package
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          arch="${TARGET%%-*}"
           mkdir -p "pkg/mdrv-oc" dist
           cp "target/$TARGET/release/mdrv-oc" pkg/mdrv-oc/
           cp README.md LICENSE specs/mdrv-oc.yaml pkg/mdrv-oc/
-          tar -czf "dist/mdrv-oc-${ver}-linux-${arch}.tar.gz" -C pkg mdrv-oc
+          # mdrv-oc-v0.2.0-<rust-target>.tar.gz
+          tar -czf "dist/mdrv-oc-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C pkg mdrv-oc
       - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.target }}
@@ -80,16 +79,16 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $ver = $env:GITHUB_REF_NAME -replace '^v',''
           New-Item -ItemType Directory -Force dist | Out-Null
-          foreach ($arch in @('x86_64', 'aarch64')) {
-            $exe = if ($arch -eq 'x86_64') { 'target/release/mdrv-oc.exe' }
-                   else { 'target/aarch64-pc-windows-msvc/release/mdrv-oc.exe' }
+          # mdrv-oc-v0.2.0-<rust-target>.zip
+          foreach ($t in @('x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc')) {
+            $exe = if ($t -eq 'x86_64-pc-windows-msvc') { 'target/release/mdrv-oc.exe' }
+                   else { "target/$t/release/mdrv-oc.exe" }
             $pkg = "pkg/mdrv-oc"
             New-Item -ItemType Directory -Force $pkg | Out-Null
             Copy-Item $exe $pkg/
             Copy-Item README.md, LICENSE $pkg/
-            Compress-Archive -Path $pkg -DestinationPath "dist/mdrv-oc-$ver-windows-$arch.zip"
+            Compress-Archive -Path $pkg -DestinationPath "dist/mdrv-oc-$env:GITHUB_REF_NAME-$t.zip"
             Remove-Item -Recurse -Force pkg
           }
       - uses: actions/upload-artifact@v7

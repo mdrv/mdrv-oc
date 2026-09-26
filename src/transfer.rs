@@ -750,6 +750,11 @@ pub fn decide_export(existing: Option<&ExportInfo>, new_updated: Option<i64>) ->
 /// Run `opencode import <file>` for one already-peeked file. Returns the
 /// child's success line (e.g. `Imported session: ses_…`).
 ///
+/// `cwd` re-anchors the imported session: the child `opencode import` runs
+/// with that working directory, so the session joins *that* directory's
+/// project instead of the caller's (works on both v1 and v2 — v2's own
+/// `--directory` flag only exists there).
+///
 /// Compressed inputs (magic-byte detected) are decompressed to a temp file
 /// first — `opencode import` expects plain JSON — and the temp file is
 /// removed whether the import succeeds or not.
@@ -758,12 +763,13 @@ pub fn import_file(
     db_override: Option<&Path>,
     file: &Path,
     flavor: OpenCodeFlavor,
+    cwd: Option<&Path>,
 ) -> Result<String> {
     if !peek_is_zst(file) {
-        return spawn_import(bin, db_override, file, flavor);
+        return spawn_import(bin, db_override, file, flavor, cwd);
     }
     let tmp = decompress_to_temp(file)?;
-    let result = spawn_import(bin, db_override, &tmp, flavor);
+    let result = spawn_import(bin, db_override, &tmp, flavor, cwd);
     let _ = std::fs::remove_file(&tmp);
     result
 }
@@ -773,6 +779,7 @@ fn spawn_import(
     db_override: Option<&Path>,
     file: &Path,
     flavor: OpenCodeFlavor,
+    cwd: Option<&Path>,
 ) -> Result<String> {
     let file_str = file.to_string_lossy().into_owned();
     let mut cmd = Command::new(bin);
@@ -780,6 +787,16 @@ fn spawn_import(
         cmd.arg("session");
     }
     cmd.arg("import").arg(&file_str);
+    if let Some(dir) = cwd {
+        if flavor == OpenCodeFlavor::V2 {
+            // v2 anchors imports via an explicit flag (survives upstream's
+            // service proxy); `cwd` alone is not enough there.
+            cmd.arg("--directory").arg(dir.to_string_lossy().as_ref());
+        } else {
+            // v1 anchors imports to the child's working directory.
+            cmd.current_dir(dir);
+        }
+    }
     if let Some(db) = db_override {
         // Keep mdrv-oc and the child talking to the same database.
         cmd.env("OPENCODE_DB", db);

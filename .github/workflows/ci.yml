@@ -1,5 +1,8 @@
 # Fast checks on every push/PR: the test suite plus lint. Cross-platform
 # build coverage lives in release.yml (musl x86_64+aarch64, MSVC x86_64+aarch64).
+# Windows additionally runs the test suite on every push — the release job
+# only proves it compiles there, and platform-dependent behaviour (path
+# handling, interactive prompts) is worth catching early.
 name: ci
 
 on:
@@ -17,3 +20,10 @@ jobs:
           components: clippy
       - run: cargo test --workspace
       - run: cargo clippy --all-targets -- -D warnings
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace

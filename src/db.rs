@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::{Error, Result};
 
@@ -132,11 +132,20 @@ impl Db {
 /// reading `session_v2` when it exists is a strict superset: nothing is
 /// lost and v2-era sessions stay visible.
 pub(crate) fn session_table(conn: &Connection) -> Result<&'static str> {
+    Ok(if table_exists(conn, "session_v2")? {
+        "session_v2"
+    } else {
+        "session"
+    })
+}
+
+/// Does this table exist in the opened database?
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master
-         WHERE type = 'table' AND name = 'session_v2'",
-        [],
+         WHERE type = 'table' AND name = ?1",
+        params![name],
         |r| r.get(0),
     )?;
-    Ok(if n > 0 { "session_v2" } else { "session" })
+    Ok(n > 0)
 }

@@ -41,7 +41,7 @@ commands:
         flags:
           --filter=: Export every session whose slug or title contains TEXT
           --limit=: Cap how many sessions the menu or filter considers (0 = no cap)
-          --out=: Output directory for the export files
+          --out=: Output directory for the export files (falls back to $MDRV_OC_OUT, then .)
           --name=: Custom file name (stem) for a single-session export
           --no-compress: Write plain .json instead of .json.zst
           --opencode-bin=: Path to the opencode binary to drive
@@ -56,15 +56,30 @@ commands:
       - name: import
         description: Import session export file(s) via opencode import
         flags:
+          --into=: Re-anchor imported session(s) to this directory's project
           -y, --yes: Skip the confirmation prompt (imports the recommended set)
           --no-backup: Skip the automatic db.bak backup
           --opencode-bin=: Path to the opencode binary to drive
         completion:
           flag:
+            into: ["$directories"]
             opencode-bin: ["$executables"]
           positionalany:
             - "$files([.json, .zst])"
             - "$directories"
+      - name: sync
+        description: Two-way convergence with a synced directory (pull, then push)
+        flags:
+          --filter=: Limit the push side to sessions whose slug or title contains TEXT
+          --no-compress: Write plain .json for new exports instead of .json.zst
+          -y, --yes: Skip the confirmation prompt (runs the recommended plan)
+          --no-backup: Skip the automatic db.bak backup before the pull
+          --opencode-bin=: Path to the opencode binary to drive
+        completion:
+          flag:
+            opencode-bin: ["$executables"]
+          positional:
+            - ["$directories"]
       - name: inspect
         description: Peek inside export file(s) or directory(ies) without importing
         completion:

@@ -82,6 +82,117 @@ pub fn exists(db: &Db, id: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// Extra per-session facts for `session show` — all optional because column
+/// sets drift between OpenCode versions (and a minimal legacy DB may not
+/// carry cost/token columns at all). `model` is pre-formatted for display,
+/// e.g. `glm-5.3-flash (zai-coding-plan)`.
+#[derive(Debug, Default, Serialize)]
+pub struct SessionDetails {
+    pub message_count: Option<i64>,
+    pub model: Option<String>,
+    pub agent: Option<String>,
+    pub version: Option<String>,
+    pub cost: Option<f64>,
+    pub tokens_input: Option<i64>,
+    pub tokens_output: Option<i64>,
+    pub tokens_cache_read: Option<i64>,
+    pub tokens_cache_write: Option<i64>,
+    pub tokens_reasoning: Option<i64>,
+}
+
+/// Read the extra facts for one session. The session extras come from the
+/// active session table (`session_v2` on v2 schemas, `session` on v1); the
+/// message count from `session_message` when present, else the legacy
+/// `message` table. PRAGMA-first: columns (or whole tables) an older schema
+/// doesn't have are simply reported as `None`.
+pub fn details(db: &Db, id: &str) -> Result<SessionDetails> {
+    let conn = db.conn();
+    let table = crate::db::session_table(conn)?;
+    let mut d = SessionDetails::default();
+
+    // Message count: v2's live table when it exists, else the legacy one.
+    let msg_table: Option<&str> = if crate::db::table_exists(conn, "session_message")? {
+        Some("session_message")
+    } else if crate::db::table_exists(conn, "message")? {
+        Some("message")
+    } else {
+        None::<&str>
+    };
+    if let Some(mt) = msg_table {
+        let sql = format!("SELECT COUNT(*) FROM {mt} WHERE session_id = ?1");
+        d.message_count = Some(conn.query_row(&sql, params![id], |r| r.get(0)).unwrap_or(0));
+    }
+
+    // Session extras: only query the columns this schema actually has.
+    let wanted = [
+        "model",
+        "agent",
+        "version",
+        "cost",
+        "tokens_input",
+        "tokens_output",
+        "tokens_cache_read",
+        "tokens_cache_write",
+        "tokens_reasoning",
+    ];
+    let cols: Vec<String> = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|n| n.ok())
+        .collect();
+    let select: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|c| cols.iter().any(|have| have == c))
+        .collect();
+    if select.is_empty() {
+        return Ok(d);
+    }
+
+    let sql = format!("SELECT {} FROM {table} WHERE id = ?1", select.join(", "));
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        for col in select {
+            match col {
+                "model" => d.model = format_model(row.get::<_, Option<String>>("model")?),
+                "agent" => d.agent = row.get("agent")?,
+                "version" => d.version = row.get("version")?,
+                "cost" => d.cost = row.get("cost")?,
+                "tokens_input" => d.tokens_input = row.get("tokens_input")?,
+                "tokens_output" => d.tokens_output = row.get("tokens_output")?,
+                "tokens_cache_read" => d.tokens_cache_read = row.get("tokens_cache_read")?,
+                "tokens_cache_write" => d.tokens_cache_write = row.get("tokens_cache_write")?,
+                "tokens_reasoning" => d.tokens_reasoning = row.get("tokens_reasoning")?,
+                _ => {}
+            }
+        }
+    }
+    Ok(d)
+}
+
+/// The `model` column stores JSON on v2 schemas
+/// (`{"id":"glm-5.3-flash","providerID":"zai-coding-plan"}`) but plain text
+/// on v1 — render either as a friendly `id (provider)` / raw string.
+fn format_model(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => {
+            let id = v.get("id").and_then(|x| x.as_str());
+            let provider = v.get("providerID").and_then(|x| x.as_str());
+            match (id, provider) {
+                (Some(id), Some(p)) => Some(format!("{id} ({p})")),
+                (Some(id), None) => Some(id.to_string()),
+                _ => Some(raw),
+            }
+        }
+        Err(_) => Some(raw),
+    }
+}
+
 /// Resolve a selector to exactly one session, or fail with `NotFound` /
 /// `Ambiguous`. Tries the most specific matcher first and stops at the first
 /// tier that yields results, so `ses_0b8dc33a7` (prefix) never falls through to
@@ -238,13 +349,19 @@ pub fn count_children(db: &Db, id: &str) -> Result<i64> {
 }
 
 fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    // v2 rows can carry NULL text (imported / untitled sessions), so every
+    // nullable column reads through Option and degrades to an empty value.
+    let text = |col: &str| -> rusqlite::Result<String> {
+        row.get::<_, Option<String>>(col)
+            .map(|o| o.unwrap_or_default())
+    };
     Ok(Session {
         id: row.get("id")?,
-        project_id: row.get("project_id")?,
+        project_id: text("project_id")?,
         parent_id: row.get("parent_id")?,
-        slug: row.get("slug")?,
-        directory: std::path::PathBuf::from(row.get::<_, String>("directory")?),
-        title: row.get("title")?,
+        slug: text("slug")?,
+        directory: std::path::PathBuf::from(text("directory")?),
+        title: text("title")?,
         time_created: row.get("time_created")?,
         time_updated: row.get("time_updated")?,
     })
@@ -460,5 +577,84 @@ mod tests {
         );
         let err = resolve(&db, &SessionSelector::parse("fresh-import")).unwrap_err();
         assert!(err.to_string().contains("matched 2 session(s)"), "{err}");
+    }
+
+    #[test]
+    fn details_reads_v2_columns_and_counts_session_messages() {
+        let db = temp_db("details-v2.db");
+        db.conn()
+            .execute_batch(&format!(
+                "{LEGACY_DDL}; {V2_DDL};
+                 ALTER TABLE session_v2 ADD COLUMN model TEXT;
+                 ALTER TABLE session_v2 ADD COLUMN agent TEXT;
+                 ALTER TABLE session_v2 ADD COLUMN version TEXT;
+                 ALTER TABLE session_v2 ADD COLUMN cost REAL;
+                 ALTER TABLE session_v2 ADD COLUMN tokens_input INTEGER;
+                 ALTER TABLE session_v2 ADD COLUMN tokens_output INTEGER;
+                 CREATE TABLE session_message (
+                     id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                     time_created INTEGER, time_updated INTEGER, data TEXT)"
+            ))
+            .unwrap();
+        insert(db.conn(), "session_v2", "ses_rich", "rich-one", "/x/r", 10);
+        db.conn()
+            .execute(
+                "UPDATE session_v2 SET model = '{\"id\":\"glm-5.3-flash\",
+                     \"providerID\":\"zai-coding-plan\"}', agent = 'build',
+                   version = '2.0.14', cost = 1.5, tokens_input = 1000,
+                   tokens_output = 200 WHERE id = 'ses_rich'",
+                [],
+            )
+            .unwrap();
+        for i in 0..3 {
+            db.conn()
+                .execute(
+                    "INSERT INTO session_message (id, session_id, type, seq, time_created,
+                                                  time_updated, data)
+                     VALUES (?1, 'ses_rich', 'message', ?2, 0, 0, '{}')",
+                    params![format!("m{i}"), i],
+                )
+                .unwrap();
+        }
+        let d = details(&db, "ses_rich").unwrap();
+        assert_eq!(d.message_count, Some(3));
+        assert_eq!(d.model.as_deref(), Some("glm-5.3-flash (zai-coding-plan)"));
+        assert_eq!(d.agent.as_deref(), Some("build"));
+        assert_eq!(d.version.as_deref(), Some("2.0.14"));
+        assert_eq!(d.cost, Some(1.5));
+        assert_eq!(d.tokens_input, Some(1000));
+        assert_eq!(d.tokens_output, Some(200));
+        // Columns absent from this DDL stay None instead of erroring.
+        assert_eq!(d.tokens_cache_read, None);
+        assert_eq!(d.tokens_reasoning, None);
+    }
+
+    #[test]
+    fn details_falls_back_to_legacy_message_table() {
+        let db = temp_db("details-legacy.db");
+        db.conn()
+            .execute_batch(&format!(
+                "{LEGACY_DDL};
+                 CREATE TABLE message (
+                     id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
+                     time_updated INTEGER, data TEXT)"
+            ))
+            .unwrap();
+        insert(db.conn(), "session", "ses_old", "old-craft", "/x/a", 5);
+        for i in 0..2 {
+            db.conn()
+                .execute(
+                    "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                     VALUES (?1, 'ses_old', 0, 0, '{}')",
+                    params![format!("m{i}")],
+                )
+                .unwrap();
+        }
+        let d = details(&db, "ses_old").unwrap();
+        assert_eq!(d.message_count, Some(2));
+        // The legacy schema has no model/cost/token columns at all.
+        assert_eq!(d.model, None);
+        assert_eq!(d.cost, None);
+        assert_eq!(d.tokens_input, None);
     }
 }
