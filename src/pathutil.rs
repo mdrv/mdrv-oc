@@ -65,9 +65,24 @@ pub fn normalize_directory(input: &str) -> Result<PathBuf> {
     if absolute.exists() {
         // Canonicalize only when the path is real, so symlinks/`..` collapse.
         // (canonicalize requires existence; that's why the else branch exists.)
-        absolute.canonicalize().map_err(crate::Error::Io)
+        let canonical = absolute.canonicalize().map_err(crate::Error::Io)?;
+        Ok(strip_verbatim(canonical))
     } else {
         Ok(absolute)
+    }
+}
+
+/// Windows' `canonicalize` returns *verbatim* paths (`\\?\C:\...`) — valid
+/// but ugly to display and surprising to compare. Convert back to plain
+/// drive paths (`\\?\UNC\server\share` → `\\server\share`).
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
     }
 }
 
@@ -135,10 +150,14 @@ mod tests {
 
     #[test]
     fn normalize_existing_dir_canonicalizes() {
-        // `/tmp` exists everywhere; canonicalization keeps it absolute & real.
-        let p = normalize_directory("/tmp").unwrap();
+        // A directory that exists on every platform; canonicalization keeps
+        // it absolute & real (and, on Windows, drops any `\\?\` prefix).
+        let dir = std::env::temp_dir();
+        let input = dir.to_str().expect("temp dir is valid unicode");
+        let p = normalize_directory(input).unwrap();
         assert!(p.is_absolute());
         assert!(p.exists());
+        assert!(!p.to_string_lossy().starts_with(r"\\?\"));
     }
 
     #[test]
