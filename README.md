@@ -114,7 +114,9 @@ mdrv-oc never serializes sessions itself).
   one command: pull (import files newer than their DB copy) then push (export
   sessions newer than their on-disk copy), with a combined preview and one
   confirmation. Everything already converged is skipped, so re-running after
-  every sync is cheap. `--filter TEXT` limits the push side.
+  every sync is cheap. `--filter TEXT` limits the push side, and
+  `--existing` bounds it to sessions the dir already holds — syncing a
+  device's copy never spawns exports for the whole database.
 - **inspect** — `mdrv-oc session inspect <file|dir>...` prints what each
   export contains (date, id, title, working directory, size, `[in db]`) by
   streaming only the `info` object out of the (transparently decompressed)

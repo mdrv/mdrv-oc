@@ -1044,6 +1044,7 @@ pub(crate) fn cmd_session_sync(
     override_path: Option<&std::path::Path>,
     dir: PathBuf,
     filter: Option<String>,
+    existing_only: bool,
     compress: bool,
     yes: bool,
     no_backup: bool,
@@ -1094,10 +1095,16 @@ pub(crate) fn cmd_session_sync(
         .map(|n| n.to_string_lossy().into_owned())
         .collect();
 
-    let sessions: Vec<oc::Session> = match &filter {
+    let mut sessions: Vec<oc::Session> = match &filter {
         Some(text) => oc::session::search(&db, text, u32::MAX)?,
         None => oc::session::list(&db, u32::MAX)?,
     };
+    // --existing: bound the push side to sessions this dir already holds, so
+    // syncing a device's copy never spawns exports for the whole database
+    // (the pull side is inherently limited to the dir's contents either way).
+    if existing_only {
+        sessions.retain(|s| !index.all_for(&s.id).is_empty());
+    }
 
     let mut push: Vec<PushPlan> = Vec::new();
     for s in &sessions {

@@ -71,6 +71,7 @@ commands:
         description: Two-way convergence with a synced directory (pull, then push)
         flags:
           --filter=: Limit the push side to sessions whose slug or title contains TEXT
+          --existing: Only push sessions that already have a copy in DIR (no new files)
           --no-compress: Write plain .json for new exports instead of .json.zst
           -y, --yes: Skip the confirmation prompt (runs the recommended plan)
           --no-backup: Skip the automatic db.bak backup before the pull

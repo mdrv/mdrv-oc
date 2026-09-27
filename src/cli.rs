@@ -230,6 +230,12 @@ pub enum SessionCommand {
         #[arg(long, value_name = "TEXT")]
         filter: Option<String>,
 
+        /// Only push sessions that already have a copy in DIR — no new
+        /// export files are created. (The pull side is always limited to
+        /// DIR's contents.) Composes with --filter.
+        #[arg(long)]
+        existing: bool,
+
         /// Write plain `.json` for new exports instead of `.json.zst`.
         #[arg(long)]
         no_compress: bool,
@@ -350,6 +356,7 @@ pub fn run(cli: Cli) -> Result<()> {
             SessionCommand::Sync {
                 dir,
                 filter,
+                existing,
                 no_compress,
                 yes,
                 no_backup,
@@ -358,6 +365,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 cli.db.as_deref(),
                 dir,
                 filter,
+                existing,
                 !no_compress,
                 yes,
                 no_backup,

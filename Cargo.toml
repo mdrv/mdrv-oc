@@ -11,7 +11,7 @@
 
 [package]
 name = "mdrv-oc"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
 rust-version = "1.85"     # MSRV — edition 2024 requires ≥ 1.85.
 authors = ["Umar Alfarouk <medrivia@gmail.com>"]
