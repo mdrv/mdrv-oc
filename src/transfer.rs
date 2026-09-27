@@ -148,6 +148,12 @@ pub fn export_session(
         cmd.arg("session");
     }
     cmd.arg("export").arg(id);
+    if flavor == OpenCodeFlavor::V2 && db_override.is_some() {
+        // A running `opencode serve --service` proxies session subcommands and
+        // ignores OPENCODE_DB; a private server honors it. Flag goes after the
+        // subcommand.
+        cmd.arg("--standalone");
+    }
     if let Some(db) = db_override {
         // Keep mdrv-oc and the child talking to the same database.
         cmd.env("OPENCODE_DB", db);
@@ -765,13 +771,275 @@ pub fn import_file(
     flavor: OpenCodeFlavor,
     cwd: Option<&Path>,
 ) -> Result<String> {
-    if !peek_is_zst(file) {
-        return spawn_import(bin, db_override, file, flavor, cwd);
+    if flavor == OpenCodeFlavor::V1 {
+        // v1 accepts only v1 payloads; hand the file over untouched.
+        if !peek_is_zst(file) {
+            return spawn_import(bin, db_override, file, flavor, cwd);
+        }
+        let tmp = decompress_to_temp(file)?;
+        let result = spawn_import(bin, db_override, &tmp, flavor, cwd);
+        let _ = std::fs::remove_file(&tmp);
+        return result;
     }
-    let tmp = decompress_to_temp(file)?;
-    let result = spawn_import(bin, db_override, &tmp, flavor, cwd);
-    let _ = std::fs::remove_file(&tmp);
+
+    // v2: bridge v1-era payloads (no `info.location`, `{info, parts}` message
+    // envelopes) into the v2 schema before handing them to the child.
+    let bytes = payload_bytes(file)?;
+    let mut import_path: Option<PathBuf> = None;
+    if needs_v2_bridge(&bytes) {
+        let data: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| Error::InvalidInput {
+                msg: format!("{}: not valid JSON: {e}", file.display()),
+            })?;
+        let mut data = data;
+        if convert_v1_to_v2(&mut data) {
+            let tmp = std::env::temp_dir().join(format!(
+                "mdrv-oc-import-{}-bridged.json",
+                std::process::id()
+            ));
+            std::fs::write(&tmp, serde_json::to_vec(&data).unwrap_or_default())?;
+            import_path = Some(tmp);
+        }
+    }
+    let tmp_owned;
+    let import_path = match import_path {
+        Some(p) => {
+            tmp_owned = p;
+            &tmp_owned
+        }
+        None => {
+            if peek_is_zst(file) {
+                tmp_owned = decompress_to_temp(file)?;
+                &tmp_owned
+            } else {
+                file
+            }
+        }
+    };
+    let result = spawn_import(bin, db_override, import_path, flavor, cwd);
+    if import_path != file {
+        let _ = std::fs::remove_file(import_path);
+    }
     result
+}
+
+/// Full payload of an export file, decompressing `.json.zst` in memory.
+fn payload_bytes(file: &Path) -> Result<Vec<u8>> {
+    if !peek_is_zst(file) {
+        return std::fs::read(file).map_err(Error::Io);
+    }
+    let f = std::fs::File::open(file).map_err(Error::Io)?;
+    let mut out = Vec::new();
+    zstd::Decoder::new(f)?.read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// True when the payload's `info` object lacks `location` — the marker of a
+/// v1-era export that v2's import schema rejects.
+fn needs_v2_bridge(bytes: &[u8]) -> bool {
+    let Ok(info) = scan_info_object(std::io::Cursor::new(bytes)) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&info)
+        .ok()
+        .and_then(|v| v.get("location").cloned())
+        .is_none()
+}
+
+/// Convert a v1 export payload in place to the schema v2's importer parses.
+/// Returns `false` when nothing needed changing. Field mapping follows the
+/// upstream v2 schema (`Session.Info`, `SessionMessage.Info`):
+///
+/// - `info.location` synthesized from `info.directory` (required by v2),
+/// - `{info, parts}` envelopes become flat `user` / `assistant` messages,
+/// - `step-start` / `step-finish` parts are dropped,
+/// - tool parts map to v2 tool content with a non-empty `content` array,
+/// - `time.completed` is always set so v2's settled-filter keeps the message.
+pub fn convert_v1_to_v2(data: &mut serde_json::Value) -> bool {
+    use serde_json::json;
+    let Some(info) = data.get_mut("info").filter(|v| v.is_object()) else {
+        return false;
+    };
+    if info.get("location").is_some() {
+        return false; // already v2
+    }
+    if let Some(dir) = info.get("directory").and_then(|v| v.as_str()) {
+        info["location"] = json!({ "directory": dir });
+    } else {
+        info["location"] = json!({ "directory": "/" });
+    }
+
+    let Some(messages) = data.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return true;
+    };
+    for msg in messages.iter_mut() {
+        let env = match msg.get("info").cloned() {
+            Some(e) if e.is_object() => e,
+            _ => continue, // already flat (v2) or malformed — leave it
+        };
+        let Some(id) = env.get("id").and_then(|v| v.as_str()).map(str::to_owned) else {
+            continue;
+        };
+        let created = env
+            .pointer("/time/created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let role = env.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let parts = msg.get("parts").and_then(|v| v.as_array()).cloned();
+        let converted = match role {
+            "user" => {
+                let text = parts
+                    .as_ref()
+                    .map(|ps| {
+                        ps.iter()
+                            .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                json!({ "id": id, "type": "user", "time": { "created": created }, "text": text })
+            }
+            "assistant" => {
+                let agent = env
+                    .get("agent")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| env.get("mode").and_then(|v| v.as_str()))
+                    .unwrap_or("build");
+                let model_id = env
+                    .pointer("/model/modelID")
+                    .or_else(|| env.get("modelID"))
+                    .and_then(|v| v.as_str());
+                let provider = env
+                    .pointer("/model/providerID")
+                    .or_else(|| env.get("providerID"))
+                    .and_then(|v| v.as_str());
+                let model = match (model_id, provider) {
+                    (Some(id), Some(p)) if !id.is_empty() && !p.is_empty() => {
+                        Some(json!({ "id": id, "providerID": p }))
+                    }
+                    _ => None,
+                };
+                // v2's import silently drops assistant messages without
+                // `time.completed` (its "settled" filter), so always set one.
+                let completed = env
+                    .pointer("/time/completed")
+                    .or_else(|| env.pointer("/time/updated"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(created);
+                let content: Vec<serde_json::Value> = parts
+                    .as_ref()
+                    .map(|ps| ps.iter().filter_map(convert_part).collect())
+                    .unwrap_or_default();
+                let mut out = json!({
+                    "id": id,
+                    "type": "assistant",
+                    "agent": agent,
+                    "content": content,
+                    "time": { "created": created, "completed": completed },
+                });
+                if let Some(m) = model {
+                    out["model"] = m;
+                }
+                if let Some(f) = env.get("finish").and_then(|v| v.as_str()) {
+                    out["finish"] = json!(f);
+                }
+                if let Some(c) = env.get("cost").and_then(|v| v.as_f64()) {
+                    out["cost"] = json!(c);
+                }
+                // v1 carries an extra `total`; v2 wants exactly the five fields.
+                if let Some(t) = env.get("tokens").filter(|v| v.is_object()) {
+                    out["tokens"] = json!({
+                        "input": t.get("input").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        "output": t.get("output").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        "reasoning": t.get("reasoning").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        "cache": {
+                            "read": t.pointer("/cache/read").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            "write": t.pointer("/cache/write").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        },
+                    });
+                }
+                out
+            }
+            _ => continue, // unknown v1 role — keep the original untouched
+        };
+        *msg = converted;
+    }
+    true
+}
+
+/// Map one v1 part to a v2 assistant-content entry; `step-start`,
+/// `step-finish` and unknown part kinds return `None` (dropped).
+fn convert_part(part: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let kind = part.get("type").and_then(|v| v.as_str())?;
+    match kind {
+        "text" => Some(json!({ "type": "text", "text": part["text"] })),
+        "reasoning" => Some(json!({ "type": "reasoning", "text": part["text"] })),
+        "tool" => {
+            let state = part.get("state").cloned().unwrap_or(json!({}));
+            let status = state.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let input = state
+                .get("input")
+                .filter(|v| v.is_object())
+                .cloned()
+                .unwrap_or(json!({}));
+            let created = state
+                .pointer("/time/start")
+                .or_else(|| state.pointer("/time/created"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let v2_state = if status == "error" {
+                let message = match state.get("error") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(obj) => obj
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("tool error")
+                        .to_owned(),
+                    _ => "tool error".to_owned(),
+                };
+                json!({
+                    "status": "error",
+                    "input": input,
+                    "error": { "type": "tool", "message": message },
+                })
+            } else {
+                json!({
+                    "status": "completed",
+                    "input": input,
+                    "content": [ { "type": "text", "text": tool_output_text(state.get("output")) } ],
+                })
+            };
+            Some(json!({
+                "type": "tool",
+                "id": part.get("callID").or_else(|| part.get("id")).cloned().unwrap_or(json!("")),
+                "name": part.get("tool").or_else(|| part.get("name")).cloned().unwrap_or(json!("")),
+                "state": v2_state,
+                "time": { "created": created },
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// v1 tool output is a plain string or `{title?, output?, metadata?}`; v2
+/// needs a non-empty text content entry.
+fn tool_output_text(output: Option<&serde_json::Value>) -> String {
+    match output {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(serde_json::Value::Object(o)) => {
+            for key in ["output", "title", "text"] {
+                if let Some(s) = o.get(key).and_then(|v| v.as_str()) {
+                    if !s.trim().is_empty() {
+                        return s.to_owned();
+                    }
+                }
+            }
+            "(empty tool output)".to_owned()
+        }
+        _ => "(empty tool output)".to_owned(),
+    }
 }
 
 fn spawn_import(
@@ -787,6 +1055,12 @@ fn spawn_import(
         cmd.arg("session");
     }
     cmd.arg("import").arg(&file_str);
+    if flavor == OpenCodeFlavor::V2 && db_override.is_some() {
+        // A running `opencode serve --service` proxies session subcommands and
+        // ignores OPENCODE_DB; a private server honors it. Flag goes after the
+        // subcommand.
+        cmd.arg("--standalone");
+    }
     if let Some(dir) = cwd {
         if flavor == OpenCodeFlavor::V2 {
             // v2 anchors imports via an explicit flag (survives upstream's
@@ -801,7 +1075,11 @@ fn spawn_import(
         // Keep mdrv-oc and the child talking to the same database.
         cmd.env("OPENCODE_DB", db);
     }
-    let label = format!("{} import {file_str}", bin.display());
+    let label = if flavor == OpenCodeFlavor::V2 {
+        format!("{} session import {file_str}", bin.display())
+    } else {
+        format!("{} import {file_str}", bin.display())
+    };
     let output = spawn_or_input_error(cmd, &label)?;
     if !output.status.success() {
         let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1020,6 +1298,96 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, contents).unwrap();
         p
+    }
+
+    fn v1_payload() -> serde_json::Value {
+        serde_json::json!({
+            "info": {
+                "id": "ses_v1", "slug": "mighty-river", "projectID": "p1",
+                "directory": "/x/g/a", "path": "", "title": "T1",
+                "agent": "build", "model": { "id": "glm", "providerID": "zai" },
+                "cost": 0,
+                "tokens": { "input": 1, "output": 2, "reasoning": 3, "cache": { "read": 4, "write": 5 } },
+                "time": { "created": 1784985859180i64, "updated": 1787023589832i64 },
+            },
+            "messages": [
+                { "info": { "id": "msg_u", "role": "user", "time": { "created": 100 } },
+                  "parts": [
+                      { "type": "text", "text": "hello" },
+                      { "type": "text", "text": "world" },
+                  ] },
+                { "info": { "id": "msg_a", "role": "assistant", "mode": "build", "agent": "build",
+                            "modelID": "glm", "providerID": "zai",
+                            "time": { "created": 200, "completed": 300 },
+                            "finish": "stop", "cost": 1.5,
+                            "tokens": { "total": 9, "input": 1, "output": 2, "reasoning": 3,
+                                        "cache": { "read": 4, "write": 5 } } },
+                  "parts": [
+                      { "type": "step-start" },
+                      { "type": "reasoning", "text": "thinking" },
+                      { "type": "tool", "tool": "bash", "callID": "call_1",
+                        "state": { "status": "completed", "input": { "cmd": "ls" }, "output": "out\nput" } },
+                      { "type": "tool", "tool": "grep", "callID": "call_2",
+                        "state": { "status": "error", "input": {}, "error": "boom" } },
+                      { "type": "step-finish" },
+                  ] },
+            ],
+        })
+    }
+
+    #[test]
+    fn convert_v1_payload_for_v2_import() {
+        let mut data = v1_payload();
+        assert!(convert_v1_to_v2(&mut data));
+
+        // location synthesized from directory
+        assert_eq!(data["info"]["location"]["directory"], "/x/g/a");
+
+        // user envelope flattened; optional prompt fields stay absent
+        let user = &data["messages"][0];
+        assert_eq!(user["type"], "user");
+        assert_eq!(user["text"], "hello\nworld");
+        assert_eq!(user["time"]["created"], 100);
+        assert!(user.get("files").is_none());
+
+        // assistant envelope flattened; settled marker always present
+        let asst = &data["messages"][1];
+        assert_eq!(asst["type"], "assistant");
+        assert_eq!(asst["agent"], "build");
+        assert_eq!(asst["model"]["id"], "glm");
+        assert_eq!(asst["model"]["providerID"], "zai");
+        assert_eq!(asst["time"]["completed"], 300);
+        assert_eq!(asst["finish"], "stop");
+        assert_eq!(asst["cost"], 1.5);
+        assert_eq!(asst["tokens"]["input"].as_f64(), Some(1.0));
+        assert_eq!(asst["tokens"]["cache"]["read"].as_f64(), Some(4.0));
+        assert!(asst["tokens"].get("total").is_none());
+
+        // step-start/step-finish dropped, reasoning/tool mapped
+        let content = asst["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "reasoning");
+        assert_eq!(content[1]["type"], "tool");
+        assert_eq!(content[1]["id"], "call_1");
+        assert_eq!(content[1]["name"], "bash");
+        assert_eq!(content[1]["state"]["status"], "completed");
+        assert_eq!(content[1]["state"]["content"][0]["text"], "out\nput");
+        assert_eq!(content[2]["state"]["status"], "error");
+        assert_eq!(content[2]["state"]["error"]["message"], "boom");
+    }
+
+    #[test]
+    fn convert_is_idempotent_on_v2_payloads() {
+        let mut data = v1_payload();
+        assert!(convert_v1_to_v2(&mut data));
+        assert!(!convert_v1_to_v2(&mut data)); // location now present
+    }
+
+    #[test]
+    fn needs_bridge_detection() {
+        assert!(needs_v2_bridge(V1_MINIFIED.as_bytes()));
+        assert!(!needs_v2_bridge(V2_PRETTY.as_bytes()));
+        assert!(!needs_v2_bridge(b"not json at all")); // unparseable → leave alone
     }
 
     #[test]

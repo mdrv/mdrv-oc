@@ -110,6 +110,12 @@ mdrv-oc never serializes sessions itself).
   `[newer — refresh]` selected by default; `[up-to-date]`, `[older — skip]`,
   `[dup — skip]` skipped by default), and asks `import which?` — answer `y`
   for the recommended set, `all` for everything, or a row spec like `1,3-5`.
+- **v1 exports import into v2** — upstream v2 rejects v1-era export files (its
+  schema needs `info.location` and a different message shape). mdrv-oc detects
+  v1 payloads and converts them in flight: `location` is synthesized from the
+  recorded directory, `{info, parts}` envelopes become flat v2 messages, and
+  `step-start` / `step-finish` parts are dropped. v2 payloads pass through
+  untouched, so the same command handles archives from both eras.
 - **sync** — `mdrv-oc session sync <dir>` runs the whole two-device loop in
   one command: pull (import files newer than their DB copy) then push (export
   sessions newer than their on-disk copy), with a combined preview and one
@@ -131,12 +137,12 @@ mdrv-oc never serializes sessions itself).
   output file — don't pipe `opencode export` yourself.
 - Requires the `opencode` binary in `PATH` (override with `--opencode-bin`);
   a `--db` override is propagated to the child via `OPENCODE_DB`.
-- **Gotcha (v2 + running service):** if a global `opencode serve --service` is
-  running, upstream v2 `session import` (and other session subcommands) proxy
-  to that service, which uses the database it was started with and **ignores
-  `OPENCODE_DB`** — sandboxed `--db` imports then land in the service's
-  database. Stop the service for `--db`-based imports; the normal no-`--db`
-  flow is unaffected.
+- **v2 + running service:** a global `opencode serve --service` daemon proxies
+  upstream v2 session subcommands and uses the database it was started with,
+  **ignoring `OPENCODE_DB`**. mdrv-oc therefore passes upstream's
+  `--standalone` flag (private server) whenever a `--db` override is set, so
+  sandboxed imports/exports always talk to the database you named. The normal
+  no-`--db` flow is unaffected either way.
 - **OpenCode v2 note:** upstream v2 keeps sessions in its own `session_v2`
   table and stops writing the legacy `session` one. mdrv-oc reads
   `session_v2` whenever the table exists (v1 databases only have `session`),
