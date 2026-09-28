@@ -10,15 +10,27 @@ use std::path::{Path, PathBuf};
 
 use crate::Result;
 
+/// The user's home directory: `$HOME`, falling back to `$USERPROFILE`.
+///
+/// Unix shells always set `HOME`; Windows typically only sets `USERPROFILE`
+/// (opencode resolves the data dir through the same OS home, so honoring
+/// both keeps mdrv-oc pointing at the same DB opencode writes).
+pub(crate) fn home_dir() -> Option<std::ffi::OsString> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|s| !s.is_empty())
+}
+
 /// Expand a leading `~` (or bare `~`) to the user's home directory.
 ///
-/// Returns the input unchanged if there is no `~`, or if `$HOME` is not set
-/// (in which case there is nothing meaningful to expand to).
+/// Returns the input unchanged if there is no `~`, or if the home directory
+/// cannot be determined (in which case there is nothing meaningful to
+/// expand to).
 pub fn expand_home(input: &str) -> PathBuf {
     if !input.starts_with('~') {
         return PathBuf::from(input);
     }
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = home_dir() else {
         return PathBuf::from(input);
     };
     // `~/x` → `$HOME/x`; `~` alone → `$HOME`; `~other/x` is left alone (we do

@@ -35,13 +35,15 @@ Arch Linux (mdrv/alarm repo, static binaries for `x86_64` and `aarch64`):
 sudo pacman -S mdrv-oc
 ```
 
-Other systems: grab a prebuilt archive from
+macOS, Windows & other systems: grab a prebuilt archive from
 [GitHub releases](https://github.com/mdrv/mdrv-oc/releases) and verify it
 against `SHA256SUMS.txt`. Assets are named
 `mdrv-oc-<version>-<rust-target>.tar.gz|zip` (e.g.
 `mdrv-oc-v0.2.0-aarch64-unknown-linux-musl.tar.gz`) and contain the binary
 plus this README and a
 [carapace](https://github.com/carapace-sh/carapace-bin) completion spec.
+Prebuilt targets: Linux musl `x86_64`/`aarch64`, macOS `x86_64`/`aarch64`
+(Apple silicon & Intel), Windows MSVC `x86_64`/`aarch64` (`.zip`).
 
 ## Quick start
 

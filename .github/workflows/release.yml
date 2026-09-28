@@ -61,6 +61,36 @@ jobs:
           name: linux-${{ matrix.target }}
           path: dist/*
 
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both slices build from the same macOS runner: Apple's clang ships
+        # both architecture slices, so x86_64 is a plain cross-compile (the
+        # bundled C deps — sqlite3 + zstd — pick up the target automatically).
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target "$TARGET"
+      - name: Package
+        run: |
+          mkdir -p "pkg/mdrv-oc" dist
+          cp "target/$TARGET/release/mdrv-oc" pkg/mdrv-oc/
+          cp README.md LICENSE specs/mdrv-oc.yaml pkg/mdrv-oc/
+          # mdrv-oc-v0.2.0-<rust-target>.tar.gz
+          tar -czf "dist/mdrv-oc-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C pkg mdrv-oc
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.target }}
+          path: dist/*
+
   windows:
     runs-on: windows-latest
     env:
@@ -98,7 +128,7 @@ jobs:
 
   release:
     if: ${{ !cancelled() && !failure() && startsWith(github.ref, 'refs/tags/') }}
-    needs: [linux, windows]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8

@@ -42,8 +42,8 @@ pub enum Error {
     /// that doesn't exist, ...).
     InvalidInput { msg: String },
 
-    /// The OpenCode data directory could not be located (no `HOME`, no
-    /// `XDG_DATA_HOME`, and no `--db` override).
+    /// The OpenCode data directory could not be located (no `HOME`/`USERPROFILE`,
+    /// no `XDG_DATA_HOME`, and no `--db` override).
     DbNotFound { detail: String },
 
     /// A wrapped `opencode` child process (`export`/`import`) exited non-zero.

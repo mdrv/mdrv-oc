@@ -84,12 +84,14 @@ impl Db {
             })
             .map(PathBuf::from)
             .or_else(|| {
-                std::env::var_os("HOME")
+                // `home_dir()` falls back to `%USERPROFILE%` on Windows —
+                // matching how opencode itself locates the data dir.
+                crate::pathutil::home_dir()
                     .map(PathBuf::from)
                     .map(|h| h.join(".local/share"))
             })
             .ok_or(Error::DbNotFound {
-                detail: "neither $XDG_DATA_HOME nor $HOME is set".into(),
+                detail: "neither $XDG_DATA_HOME nor $HOME/$USERPROFILE is set".into(),
             })?;
 
         Ok(data_dir.join(DB_REL))
