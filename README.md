@@ -29,6 +29,23 @@ cargo install --path .
 # binary is `mdrv-oc`
 ```
 
+macOS & Linux:
+
+```bash
+curl -fsSL https://github.com/mdrv/mdrv-oc/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/mdrv/mdrv-oc/releases/latest/download/install.ps1 | iex
+```
+
+Both scripts verify the download against the release's `SHA256SUMS.txt`,
+install into `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\mdrv-oc`) and
+offer to update your `PATH`. Pin a version with `--version X.Y.Z` /
+`MDRV_OC_VERSION` (Windows: `-Version`).
+
 Arch Linux (mdrv/alarm repo, static binaries for `x86_64` and `aarch64`):
 
 ```bash

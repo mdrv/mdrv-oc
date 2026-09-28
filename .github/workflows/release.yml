@@ -135,6 +135,8 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      - name: Bundle installers
+        run: cp scripts/install.sh scripts/install.ps1 dist/
       - name: Checksums
         working-directory: dist
         run: sha256sum * > SHA256SUMS.txt
