@@ -131,6 +131,7 @@ jobs:
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
