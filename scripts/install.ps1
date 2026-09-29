@@ -1,4 +1,4 @@
-# install.ps1 — install prebuilt mdrv-oc on Windows in one command.
+﻿# install.ps1 - install prebuilt mdrv-oc on Windows in one command.
 # Downloads the right archive from GitHub Releases, verifies it against the
 # release's SHA256SUMS.txt, and installs mdrv-oc.exe into
 # %LOCALAPPDATA%\Programs\mdrv-oc, then adds that directory to the user PATH.
@@ -116,7 +116,7 @@ try {
 	try {
 		Invoke-WebRequest -Uri "$base_url/SHA256SUMS.txt" -OutFile $sums_path -UseBasicParsing
 	} catch {
-		Write-Information "==> no SHA256SUMS.txt published for this release — skipping verification"
+		Write-Information "==> no SHA256SUMS.txt published for this release - skipping verification"
 		$sums_path = $null
 	}
 	if ($sums_path) {
@@ -125,11 +125,11 @@ try {
 			$expected = ($line -split '\s+') | Select-Object -First 1
 			$actual = (Get-FileHash -Path $zip_path -Algorithm SHA256).Hash.ToLower()
 			if ($actual -ne $expected) {
-				throw "ERROR: checksum mismatch — the download is corrupted or was tampered with"
+				throw "ERROR: checksum mismatch - the download is corrupted or was tampered with"
 			}
 			Write-Information "==> verifying sha256 ($expected)"
 		} else {
-			Write-Information "==> no checksum for $artifact in SHA256SUMS.txt — skipping verification"
+			Write-Information "==> no checksum for $artifact in SHA256SUMS.txt - skipping verification"
 		}
 	}
 
@@ -187,9 +187,9 @@ function Add-Path($LiteralPath) {
 if (-not $NoModifyPath) {
 	if (Add-Path $Destination) {
 		Write-Information ''
-		Write-Information "PATH updated (user) — open a new terminal, then run: mdrv-oc --help"
+		Write-Information "PATH updated (user) - open a new terminal, then run: mdrv-oc --help"
 	} else {
-		Write-Information "    $Destination is already on PATH — run: mdrv-oc --help"
+		Write-Information "    $Destination is already on PATH - run: mdrv-oc --help"
 	}
 } else {
 	Write-Information ''
