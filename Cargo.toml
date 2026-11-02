@@ -13,7 +13,7 @@
 name = "mdrv-oc"
 version = "0.2.3"
 edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
-rust-version = "1.85"     # MSRV — edition 2024 requires ≥ 1.85.
+rust-version = "1.89"     # MSRV — std::fs file locking (schedule queue) landed in 1.89.
 authors = ["Umar Alfarouk <medrivia@gmail.com>"]
 license = "MIT"
 description = "Inspect and manipulate the OpenCode SQLite database (sessions, projects)"
@@ -60,8 +60,17 @@ zstd = "0.13"
 
 # `jiff` = timezone-correct date handling (by BurntSushi). Used for the
 # local-timezone `YYYY-MM-DD` prefix of export file names; on-screen date
-# display keeps the zero-dep UTC day math to stay byte-stable.
+# display keeps the zero-dep UTC day math to stay byte-stable. Also powers
+# the prompt scheduler's `--at` / `--in` time parsing.
 jiff = "0.2"
+
+# `ureq` = small blocking HTTP client (rustls TLS). Talks to the OpenCode
+# background service's HTTP API (session list, prompt delivery) — the same
+# server your `opencode serve --service` already runs, discovered via its
+# registration file under `$XDG_STATE_HOME/opencode/service.json`.
+#
+# Queue/daemon locking needs no crate: Rust ≥1.89 ships file locks in std.
+ureq = "3"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"   # coloured diff output in failing tests

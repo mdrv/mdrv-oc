@@ -146,6 +146,50 @@ mdrv-oc never serializes sessions itself).
   export contains (date, id, title, working directory, size, `[in db]`) by
   streaming only the `info` object out of the (transparently decompressed)
   file. No DB writes, no `opencode` subprocess.
+
+## Prompt scheduler
+
+mdrv-oc can send prompts into a **running** OpenCode session — right now or
+on a schedule — through the background service's HTTP API. This absorbs the
+old `opencode-prompt` / `opencode-sessions` Nushell helpers.
+
+```sh
+# send now (session picker opens when --session is omitted)
+mdrv-oc session prompt -s ses_ff67b028 run the full test suite
+
+# schedule one-shots (--at / --in); the daemon delivers when due
+mdrv-oc session prompt -s ses_ff67b028 --at "tomorrow 07:00" nightly refactor pass
+mdrv-oc session prompt -s ses_ff67b028 --in 45m poke the CI branch
+mdrv-oc daemon                        # foreground watcher (ctrl-c to stop)
+
+# housekeeping
+mdrv-oc session prompt list           # pending first, then delivered/failed
+mdrv-oc session prompt cancel sch_21d # id or unique prefix
+mdrv-oc session list --server         # sessions from the server, not the DB
+```
+
+- **Server discovery needs no config:** mdrv-oc reads the running service's
+  registration file (`$XDG_STATE_HOME/opencode/service.json` — url + password,
+  the same contract upstream clients use). Override with `--url` or
+  `$MDRV_OC_SERVER_URL` (+ optional `$MDRV_OC_SERVER_PASSWORD`) to target a
+  remote server, e.g. through an SSH tunnel.
+- **Scheduling** is one-shot: `--at` (RFC3339, `YYYY-MM-DD HH:MM`, bare
+  `HH:MM` — today if still future, else tomorrow — or `tomorrow HH:MM`) and
+  `--in` (`90s`, `45m`, `2h`, `1d`, compounds like `1h30m`), all local time.
+  Scheduling warns when no daemon is running; overdue one-shots fire late
+  once, failed deliveries retry every 60 s up to 10 times and then show the
+  error in `list`. Prompting a busy session is safe — upstream parks/steers
+  queued prompts.
+- **The queue** is one JSON file, `<data>/mdrv-oc/schedule.json` (flock-guarded
+  against the daemon; override the directory with `$MDRV_OC_DATA_DIR`). The
+  daemon is deliberately foreground-only and single-instance — no hidden
+  systemd units to forget about.
+- **Agent/model switching is opt-in**: `--agent NAME` / `--model PROVIDER/ID`
+  switch the target session right before the prompt; otherwise the session
+  keeps its current setup (no hardcoded model map).
+- Quirk: a prompt whose *first word* is literally `list` or `cancel` parses as
+  a subcommand — pass that text via `--file` instead.
+
 - Like upstream import, an imported session is **re-anchored to the project of
   your current working directory** — the original machine's paths are ignored,
   so no path remapping is needed. Run the import from inside the project, or

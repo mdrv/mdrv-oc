@@ -25,6 +25,8 @@ pub mod error;
 pub mod model;
 pub mod pathutil;
 pub mod project;
+pub mod schedule;
+pub mod server;
 pub mod session;
 pub mod transfer;
 

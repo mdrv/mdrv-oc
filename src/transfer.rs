@@ -609,11 +609,7 @@ pub fn dedupe_newest(peeked: &[ExportInfo]) -> Vec<Option<usize>> {
                 // strictly newer wins; ties keep the later file
                 let k_upd = peeked[k].time_updated.unwrap_or(i64::MIN);
                 let i_upd = e.time_updated.unwrap_or(i64::MIN);
-                if i_upd >= k_upd {
-                    i
-                } else {
-                    k
-                }
+                if i_upd >= k_upd { i } else { k }
             }
             None => i,
         };
@@ -624,11 +620,7 @@ pub fn dedupe_newest(peeked: &[ExportInfo]) -> Vec<Option<usize>> {
         .enumerate()
         .map(|(i, e)| {
             let winner = best[e.session_id.as_str()];
-            if winner == i {
-                None
-            } else {
-                Some(winner)
-            }
+            if winner == i { None } else { Some(winner) }
         })
         .collect()
 }
@@ -1030,10 +1022,12 @@ fn tool_output_text(output: Option<&serde_json::Value>) -> String {
         Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
         Some(serde_json::Value::Object(o)) => {
             for key in ["output", "title", "text"] {
-                if let Some(s) = o.get(key).and_then(|v| v.as_str()) {
-                    if !s.trim().is_empty() {
-                        return s.to_owned();
-                    }
+                if let Some(s) = o
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    return s.to_owned();
                 }
             }
             "(empty tool output)".to_owned()

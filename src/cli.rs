@@ -18,9 +18,10 @@ use clap::{Parser, Subcommand};
 use mdrv_oc as oc;
 
 use crate::commands::{
-    cmd_project_list, cmd_project_show, cmd_session_export, cmd_session_import,
-    cmd_session_inspect, cmd_session_list, cmd_session_move, cmd_session_show, cmd_session_sync,
-    open_db, Output,
+    Output, PromptArgs, cmd_daemon, cmd_project_list, cmd_project_show, cmd_prompt_cancel,
+    cmd_prompt_list, cmd_session_export, cmd_session_import, cmd_session_inspect, cmd_session_list,
+    cmd_session_list_server, cmd_session_move, cmd_session_prompt, cmd_session_show,
+    cmd_session_sync, open_db,
 };
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,19 @@ pub enum Command {
         /// What to complete: "sessions" or "projects".
         what: String,
     },
+
+    /// Run the prompt-scheduler daemon in the foreground.
+    ///
+    /// Watches the schedule queue and delivers due prompts to the running
+    /// OpenCode server. Overdue one-shots fire late (once); failed deliveries
+    /// retry every 60 s up to 10 times, then the job is marked `failed` (see
+    /// `session prompt list`). Only one daemon can run per user — a second
+    /// invocation exits with an error. `--once` fires what is due and exits.
+    Daemon {
+        /// Fire due prompts once and exit (no watch loop).
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -93,6 +107,17 @@ pub enum SessionCommand {
         /// How many sessions to show (default 20).
         #[arg(long, default_value_t = 20)]
         limit: u32,
+
+        /// List from the running OpenCode background service (its HTTP API)
+        /// instead of the local DB — what `opencode-sessions` in the old
+        /// Nushell config did. Implies newest-first per project directory.
+        #[arg(long)]
+        server: bool,
+
+        /// With --server: restrict to this project directory (default: all
+        /// projects).
+        #[arg(long, value_name = "DIR", requires = "server")]
+        directory: Option<String>,
     },
 
     /// Show one session (exact id, id prefix, slug, or title substring),
@@ -264,6 +289,56 @@ pub enum SessionCommand {
         /// Export file(s) or directory(ies) containing export files.
         paths: Vec<PathBuf>,
     },
+
+    /// Send a prompt to a running OpenCode session — now or on a schedule.
+    ///
+    /// TEXT comes from the arguments, --file, or "-" (stdin). Without
+    /// --at/--in the prompt is delivered immediately; with one of them it is
+    /// queued for the `mdrv-oc daemon` to deliver when due. The server is
+    /// discovered automatically from the running background service; override
+    /// with --url or $MDRV_OC_SERVER_URL.
+    ///
+    /// Quirk: a prompt whose *first word* is literally `list` or `cancel` is
+    /// parsed as a subcommand — use --file for that text.
+    #[command(visible_alias = "say")]
+    Prompt {
+        /// Prompt text ("-" = read stdin).
+        text: Vec<String>,
+
+        /// Read the prompt text from this file ("-" = stdin).
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+
+        /// Target session: exact id or unique id prefix. Omit to pick
+        /// interactively from the server's session list.
+        #[arg(short, long, value_name = "ID")]
+        session: Option<String>,
+
+        /// Deliver at this local time: RFC3339, "YYYY-MM-DD HH:MM", "HH:MM"
+        /// (today if still future, else tomorrow), or "tomorrow HH:MM".
+        #[arg(long, value_name = "WHEN")]
+        at: Option<String>,
+
+        /// Deliver after this duration: 90s, 45m, 2h, 1d, 1h30m.
+        #[arg(long = "in", value_name = "DURATION")]
+        in_: Option<String>,
+
+        /// Switch the session to this agent before prompting.
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Switch the session to this model (PROVIDER/ID) before prompting.
+        #[arg(long, value_name = "PROVIDER/ID")]
+        model: Option<String>,
+
+        /// OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the
+        /// running service's registration file).
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+
+        #[command(subcommand)]
+        cmd: Option<PromptCommand>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -273,6 +348,18 @@ pub enum ProjectCommand {
 
     /// Show one project by exact id.
     Show { id: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptCommand {
+    /// List scheduled and recent prompts (pending first, then finished).
+    List,
+
+    /// Cancel a pending scheduled prompt (id or unique id prefix).
+    Cancel {
+        /// The job id shown by `session prompt list` (or a unique prefix).
+        id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -286,9 +373,17 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Session { action } => match action {
-            SessionCommand::List { limit } => {
-                let db = open_db(cli.db.as_deref())?;
-                cmd_session_list(&db, limit, output)?
+            SessionCommand::List {
+                limit,
+                server,
+                directory,
+            } => {
+                if server {
+                    cmd_session_list_server(directory.as_deref(), limit, output)?
+                } else {
+                    let db = open_db(cli.db.as_deref())?;
+                    cmd_session_list(&db, limit, output)?
+                }
             }
             SessionCommand::Show { session } => {
                 let db = open_db(cli.db.as_deref())?;
@@ -376,6 +471,30 @@ pub fn run(cli: Cli) -> Result<()> {
             SessionCommand::Inspect { paths } => {
                 cmd_session_inspect(cli.db.as_deref(), paths, output)?
             }
+            SessionCommand::Prompt {
+                text,
+                file,
+                session,
+                at,
+                in_,
+                agent,
+                model,
+                url,
+                cmd,
+            } => match cmd {
+                Some(PromptCommand::List) => cmd_prompt_list(output)?,
+                Some(PromptCommand::Cancel { id }) => cmd_prompt_cancel(&id, output)?,
+                None => cmd_session_prompt(PromptArgs {
+                    text,
+                    file,
+                    session,
+                    at,
+                    in_,
+                    agent,
+                    model,
+                    url,
+                })?,
+            },
         },
         Command::Project { action } => match action {
             ProjectCommand::List => {
@@ -392,6 +511,7 @@ pub fn run(cli: Cli) -> Result<()> {
             print!("{}", include_str!("../specs/mdrv-oc.yaml"));
         }
         Command::Complete { what } => cmd_complete(cli.db.as_deref(), &what)?,
+        Command::Daemon { once } => cmd_daemon(once)?,
     }
     Ok(())
 }

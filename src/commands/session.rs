@@ -12,13 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use mdrv_oc as oc;
 
 use super::util::{
-    ask_yes, export_stem_of, file_label, fmt_date, fmt_size, open_db, print_details_human,
-    print_session_human, prompt_line, Output,
+    Output, ask_yes, export_stem_of, file_label, fmt_date, fmt_size, open_db, print_details_human,
+    print_session_human, prompt_line,
 };
 
 // ---------------------------------------------------------------------------
@@ -1059,12 +1059,14 @@ pub(crate) fn cmd_session_sync(
         );
     }
     let out_dir = oc::pathutil::normalize_directory(&dir.to_string_lossy())?;
-    if let Some(text) = &filter {
-        if text.trim().is_empty() {
-            bail!("--filter is empty");
-        }
+    if filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| t.is_empty())
+        .is_some()
+    {
+        bail!("--filter is empty");
     }
-
     let db = open_db(override_path)?;
 
     // --- pull plan: files in the dir vs the DB ------------------------------

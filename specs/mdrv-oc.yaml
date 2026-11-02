@@ -17,6 +17,8 @@ commands:
         description: List sessions, newest first
         flags:
           --limit=: How many sessions to show
+          --server: List from the running OpenCode service instead of the local DB
+          --directory=: With --server: restrict to this project directory
       - name: show
         description: Show one session (id, id prefix, slug, or title substring)
         completion:
@@ -87,6 +89,26 @@ commands:
           positionalany:
             - "$files([.json, .zst])"
             - "$directories"
+      - name: prompt
+        aliases: [say]
+        description: Send a prompt to a running OpenCode session — now or on a schedule
+        flags:
+          --file=: Read the prompt text from this file ("-" = stdin)
+          -s, --session=: Target session id (or unique id prefix); omit to pick interactively
+          --at=: Deliver at this local time (RFC3339, "YYYY-MM-DD HH:MM", "HH:MM", "tomorrow HH:MM")
+          --in=: Deliver after this duration (90s, 45m, 2h, 1d, 1h30m)
+          --agent=: Switch the session to this agent before prompting
+          --model=: Switch the session to this model (PROVIDER/ID) before prompting
+          --url=: OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the running service)
+        commands:
+          - name: list
+            description: List scheduled and recent prompts
+          - name: cancel
+            description: Cancel a pending scheduled prompt (id or unique prefix)
+  - name: daemon
+    description: Run the prompt-scheduler daemon in the foreground
+    flags:
+      --once: Fire due prompts once and exit
   - name: project
     description: Inspect projects
     commands:
