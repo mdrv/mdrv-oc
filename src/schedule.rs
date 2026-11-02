@@ -240,12 +240,20 @@ impl Queue {
 
     /// Allocate a fresh job id (`sch_xxxxxxxx`).
     pub fn new_job_id(&self) -> String {
+        // Time alone is not enough: macOS's clock can tick coarser than the
+        // generation rate, so a process-global sequence counter guarantees
+        // uniqueness within a process; time + pid cover across processes
+        // (and the collision check against the loaded queue backstops both).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         loop {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            let mut h = nanos ^ ((std::process::id() as u64) << 48);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut h = nanos
+                ^ (seq.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                ^ ((std::process::id() as u64) << 48);
             h ^= h >> 33;
             h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
             h ^= h >> 33;
