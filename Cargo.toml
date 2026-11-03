@@ -11,7 +11,7 @@
 
 [package]
 name = "mdrv-oc"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
 rust-version = "1.89"     # MSRV — std::fs file locking (schedule queue) landed in 1.89.
 authors = ["Umar Alfarouk <medrivia@gmail.com>"]
