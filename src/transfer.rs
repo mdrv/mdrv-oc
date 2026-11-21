@@ -1036,6 +1036,23 @@ fn tool_output_text(output: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Upstream v2 importers reject payloads from schema eras older than the CLI
+/// running them: e.g. a 2.0.x CLI requires top-level `recent` on compaction
+/// messages that pre-2.1 exports only carry in `metadata.recent`, and fails
+/// with a cryptic SchemaError naming the key. mdrv-oc does not rewrite v2
+/// payloads — the fix is on the CLI side, so point the user at it.
+fn schema_hint(detail: &str) -> Option<&'static str> {
+    if detail.contains("SchemaError") || detail.contains("Missing key") {
+        Some(
+            "hint: the installed opencode rejects this export's schema; \
+             opencode 2.1+ imports legacy export payloads. Update opencode \
+             and retry.",
+        )
+    } else {
+        None
+    }
+}
+
 fn spawn_import(
     bin: &Path,
     db_override: Option<&Path>,
@@ -1083,6 +1100,10 @@ fn spawn_import(
         } else if !stdout_tail.is_empty() {
             detail.push('\n');
             detail.push_str(&stdout_tail);
+        }
+        if let Some(hint) = schema_hint(&detail) {
+            detail.push('\n');
+            detail.push_str(hint);
         }
         return Err(Error::External { cmd: label, detail });
     }
@@ -1271,6 +1292,18 @@ mod tests {
     use super::*;
 
     const V1_MINIFIED: &str = r#"{"info":{"id":"ses_v1","slug":"mighty-river","title":"T1","directory":"/x/g/a","time":{"created":1784985859180,"updated":1787023589832}},"messages":[{"info":{"role":"user"},"parts":[]}]}"#;
+
+    #[test]
+    fn schema_hint_targets_schema_rejections_only() {
+        let schema_error = "command failed: opencode session import x.json\n\
+             SchemaError: Missing key\n  at [\"messages\"][164][\"recent\"]";
+        assert!(schema_hint(schema_error).is_some());
+        assert!(schema_hint("Missing key\n  at [\"info\"][\"x\"]").is_some());
+        // Upstream-internal failures (500s, conflicts) get no misleading hint.
+        assert!(schema_hint("Failed to import session: Internal Server Error").is_none());
+        assert!(schema_hint("Session already exists").is_none());
+        assert!(schema_hint("").is_none());
+    }
 
     const V2_PRETTY: &str = r#"{
   "info": {

@@ -135,6 +135,12 @@ mdrv-oc never serializes sessions itself).
   recorded directory, `{info, parts}` envelopes become flat v2 messages, and
   `step-start` / `step-finish` parts are dropped. v2 payloads pass through
   untouched, so the same command handles archives from both eras.
+- **import wants opencode 2.1+** — v2-era exports from before 2.1 store
+  compaction summaries in `metadata.recent`; 2.0.x importers reject those with
+  a `SchemaError` (they require a top-level `recent`), while 2.1+ importers
+  decode them natively. mdrv-oc passes v2 payloads through untouched and, when
+  the CLI still rejects one, appends a hint to update opencode instead of
+  translating schemas it doesn't own.
 - **sync** — `mdrv-oc session sync <dir>` runs the whole two-device loop in
   one command: pull (import files newer than their DB copy) then push (export
   sessions newer than their on-disk copy), with a combined preview and one
