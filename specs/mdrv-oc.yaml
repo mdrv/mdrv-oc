@@ -105,10 +105,23 @@ commands:
             description: List scheduled and recent prompts
           - name: cancel
             description: Cancel a pending scheduled prompt (id or unique prefix)
+          - name: edit
+            description: Rewrite, retarget or retime a scheduled prompt (id or unique prefix)
+            flags:
+              --text=: New prompt text
+              --file=: New prompt text from this file ("-" = stdin)
+              -s, --session=: Move the prompt to this session id
+              --at=: New delivery time (same grammar as `session prompt --at`)
+              --in=: New delivery time as a duration from now
+              --url=: OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the running service)
   - name: daemon
     description: Run the prompt-scheduler daemon in the foreground
     flags:
       --once: Fire due prompts once and exit
+  - name: tui
+    description: Open the prompt queue on a terminal UI (also: bare mdrv-oc on a TTY)
+    flags:
+      --url=: OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the running service)
   - name: project
     description: Inspect projects
     commands:

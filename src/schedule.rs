@@ -116,6 +116,62 @@ impl Job {
             JobState::Failed => "failed",
         }
     }
+
+    /// Whether a recorded `delivering` should still be treated as a POST in
+    /// flight. The daemon clears it on its next pass, but a daemon that died
+    /// mid-POST leaves the value behind; after [`DELIVERY_STALE_MS`] the job is
+    /// editable again (and the next mutation normalizes it to `pending`).
+    pub fn in_flight(&self, now_ms: i64) -> bool {
+        self.state == JobState::Delivering
+            && self
+                .last_attempt_ms
+                .is_some_and(|last| now_ms.saturating_sub(last) < DELIVERY_STALE_MS)
+    }
+}
+
+/// How long an abandoned `delivering` keeps a job locked from edits.
+pub const DELIVERY_STALE_MS: i64 = 5 * 60_000;
+
+/// The fields an edit is allowed to touch. `None` leaves a field alone.
+#[derive(Debug, Clone, Default)]
+pub struct JobPatch {
+    /// Replacement prompt text.
+    pub text: Option<String>,
+    /// Replacement target session, with the title whose session it resolves
+    /// to (`None` clears the stored title).
+    pub session: Option<SessionSwap>,
+    /// Replacement due time (epoch ms).
+    pub due_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSwap {
+    pub id: String,
+    pub title: Option<String>,
+}
+
+/// What the editing screen saw when it opened a job. An edit carrying a
+/// different snapshot is refused rather than silently overwriting a change
+/// made in between (a daemon retry, another `mdrv-oc`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobExpect {
+    pub state: JobState,
+    pub due_ms: i64,
+    pub attempts: u32,
+    pub session_id: String,
+    pub text: String,
+}
+
+impl JobExpect {
+    pub fn of(job: &Job) -> Self {
+        Self {
+            state: job.state,
+            due_ms: job.due_ms,
+            attempts: job.attempts,
+            session_id: job.session_id.clone(),
+            text: job.text.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -205,6 +261,187 @@ impl Queue {
         })();
         let _ = file.unlock();
         out
+    }
+
+    /// Load without the `delivering` → `pending` recovery, so a screen can
+    /// tell a POST in flight from a job waiting for its time. Only display
+    /// paths use it; mutations go through [`Self::with_locked`].
+    pub fn load_display() -> Result<Queue> {
+        Self::load_display_from(&Self::path()?)
+    }
+
+    pub fn load_display_from(path: &std::path::Path) -> Result<Queue> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Queue::default()),
+            Err(e) => return Err(e.into()),
+        };
+        serde_json::from_slice(&bytes).map_err(|e| Error::InvalidInput {
+            msg: format!("{} is corrupt: {e}", path.display()),
+        })
+    }
+
+    // -- per-job mutations ---------------------------------------------------
+
+    /// The index of the job that `sel` names: its exact id, else its unique
+    /// prefix. Ambiguity lists the candidates instead of guessing.
+    pub fn find_job(&self, sel: &str) -> Result<usize> {
+        if let Some(i) = self.jobs.iter().position(|j| j.id == sel) {
+            return Ok(i);
+        }
+        let prefix: Vec<usize> = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.id.starts_with(sel))
+            .map(|(i, _)| i)
+            .collect();
+        match prefix.len() {
+            1 => Ok(prefix[0]),
+            0 => Err(Error::InvalidInput {
+                msg: format!("no scheduled prompt matches {sel:?}"),
+            }),
+            n => Err(Error::InvalidInput {
+                msg: format!(
+                    "{sel:?} matched {n} jobs; use a longer prefix:\n{}",
+                    prefix
+                        .iter()
+                        .take(8)
+                        .map(|&i| format!("  • {}", self.jobs[i].id))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            }),
+        }
+    }
+
+    /// Refuse edits on a finished job, on one being delivered right now, and
+    /// on one that changed since `expect` was taken.
+    fn check_editable(job: &Job, expect: &JobExpect) -> Result<()> {
+        let bad = |msg: String| Error::InvalidInput { msg };
+        if matches!(job.state, JobState::Delivered | JobState::Failed) {
+            return Err(bad(format!(
+                "job {} is already finished ({}); requeue it instead",
+                job.id,
+                job.state_str()
+            )));
+        }
+        let now = now_ms();
+        let in_flight = job.in_flight(now)
+            || (expect.state == JobState::Delivering
+                && job
+                    .last_attempt_ms
+                    .is_some_and(|last| now.saturating_sub(last) < DELIVERY_STALE_MS));
+        if in_flight {
+            return Err(bad(format!(
+                "job {} is being delivered right now; its prompt may already be in flight",
+                job.id
+            )));
+        }
+        if expect.state != job.state
+            || expect.due_ms != job.due_ms
+            || expect.attempts != job.attempts
+            || expect.session_id != job.session_id
+            || expect.text != job.text
+        {
+            return Err(bad(format!(
+                "job {} changed since it was loaded; reload and try again",
+                job.id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Apply `patch` to the job at `idx`, refusing a stale or in-flight edit.
+    pub fn update_job(&mut self, idx: usize, expect: &JobExpect, patch: &JobPatch) -> Result<Job> {
+        let job = &mut self.jobs[idx];
+        Self::check_editable(job, expect)?;
+        if let Some(text) = &patch.text {
+            if text.trim().is_empty() {
+                return Err(Error::InvalidInput {
+                    msg: "prompt text is empty".into(),
+                });
+            }
+            job.text = text.clone();
+        }
+        if let Some(session) = &patch.session {
+            if session.id.trim().is_empty() {
+                return Err(Error::InvalidInput {
+                    msg: "session id is empty".into(),
+                });
+            }
+            job.session_id = session.id.clone();
+            // The stored title belongs to the old session; a caller without a
+            // resolved title clears it rather than keeping a wrong one.
+            job.session_title = session.title.clone();
+        }
+        if let Some(due_ms) = patch.due_ms {
+            job.due_ms = due_ms;
+        }
+        Ok(job.clone())
+    }
+
+    /// Remove a job. `expect`, when given, guards against cancelling a job
+    /// that changed since it was shown. Finished jobs are refused.
+    pub fn cancel_job(&mut self, idx: usize, expect: Option<&JobExpect>) -> Result<Job> {
+        let job = &self.jobs[idx];
+        if matches!(job.state, JobState::Delivered | JobState::Failed) {
+            return Err(Error::InvalidInput {
+                msg: format!(
+                    "job {} is already finished ({}); nothing to cancel",
+                    job.id,
+                    job.state_str()
+                ),
+            });
+        }
+        if let Some(expect) = expect
+            && (expect.state != job.state
+                || expect.due_ms != job.due_ms
+                || expect.attempts != job.attempts
+                || expect.session_id != job.session_id
+                || expect.text != job.text)
+        {
+            return Err(Error::InvalidInput {
+                msg: format!(
+                    "job {} changed since it was loaded; reload and try again",
+                    job.id
+                ),
+            });
+        }
+        Ok(self.jobs.remove(idx))
+    }
+
+    /// Make a pending job due immediately and give it a fresh retry budget,
+    /// so the next daemon tick picks it up instead of waiting out the retry
+    /// interval of an earlier failure.
+    pub fn fire_job_now(&mut self, idx: usize, expect: &JobExpect) -> Result<Job> {
+        let job = &mut self.jobs[idx];
+        Self::check_editable(job, expect)?;
+        job.due_ms = now_ms();
+        job.attempts = 0;
+        job.last_attempt_ms = None;
+        job.last_error = None;
+        Ok(job.clone())
+    }
+
+    /// Copy a finished (or pending) job into a new pending one due at
+    /// `due_ms`, keeping the delivery fields. The source stays as history.
+    pub fn requeue_job(&mut self, src: usize, due_ms: i64) -> Result<Job> {
+        let source = self.jobs[src].clone();
+        let mut job = Job {
+            id: self.new_job_id(),
+            created_ms: now_ms(),
+            due_ms,
+            state: JobState::Pending,
+            attempts: 0,
+            last_attempt_ms: None,
+            last_error: None,
+            done_ms: None,
+            ..source
+        };
+        job.text = self.jobs[src].text.clone();
+        self.jobs.push(job.clone());
+        Ok(job)
     }
 
     // -- housekeeping -------------------------------------------------------
@@ -688,5 +925,169 @@ mod tests {
             assert!(id.starts_with("sch_"));
             assert!(seen.insert(id), "id collision");
         }
+    }
+
+    fn pending_at(due: i64) -> Job {
+        job("sch_a", JobState::Pending, due, 0, None)
+    }
+
+    #[test]
+    fn edit_applies_every_field_and_clears_the_old_title() {
+        let mut q = Queue::default();
+        q.jobs.push(pending_at(1));
+        q.jobs[0].session_title = Some("old title".into());
+        let expect = JobExpect::of(&q.jobs[0]);
+        let patch = JobPatch {
+            text: Some("new text".into()),
+            session: Some(SessionSwap {
+                id: "ses_new".into(),
+                title: None,
+            }),
+            due_ms: Some(42),
+        };
+        let updated = q.update_job(0, &expect, &patch).unwrap();
+        assert_eq!(updated.text, "new text");
+        assert_eq!(updated.session_id, "ses_new");
+        assert_eq!(updated.session_title, None);
+        assert_eq!(updated.due_ms, 42);
+        assert_eq!(updated.id, "sch_a");
+    }
+
+    #[test]
+    fn a_stale_expectation_is_refused() {
+        let mut q = Queue::default();
+        q.jobs.push(pending_at(1));
+        let expect = JobExpect::of(&q.jobs[0]);
+        // Someone else rewrote the text in between.
+        q.jobs[0].text = "theirs".into();
+        let err = q
+            .update_job(
+                0,
+                &expect,
+                &JobPatch {
+                    text: Some("mine".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("changed since it was loaded"));
+        assert_eq!(q.jobs[0].text, "theirs");
+    }
+
+    #[test]
+    fn an_in_flight_job_refuses_edits_and_a_stale_one_does_not() {
+        let now = now_ms();
+        let mut q = Queue::default();
+        q.jobs
+            .push(job("sch_a", JobState::Delivering, 1, 1, Some(now)));
+        let expect = JobExpect::of(&q.jobs[0]);
+        let patch = JobPatch {
+            text: Some("later".into()),
+            ..Default::default()
+        };
+        let err = q.update_job(0, &expect, &patch).unwrap_err();
+        assert!(format!("{err}").contains("right now"));
+
+        // A daemon that died mid-POST leaves `delivering` behind: once the
+        // attempt is old the job is editable again.
+        q.jobs[0].last_attempt_ms = Some(now - DELIVERY_STALE_MS - 1);
+        let expect = JobExpect::of(&q.jobs[0]);
+        assert!(q.update_job(0, &expect, &patch).is_ok());
+    }
+
+    #[test]
+    fn finished_jobs_are_not_editable() {
+        let mut q = Queue::default();
+        q.jobs.push(job("sch_d", JobState::Delivered, 1, 0, None));
+        let expect = JobExpect::of(&q.jobs[0]);
+        let err = q.update_job(0, &expect, &JobPatch::default()).unwrap_err();
+        assert!(format!("{err}").contains("requeue"));
+    }
+
+    #[test]
+    fn empty_text_is_refused() {
+        let mut q = Queue::default();
+        q.jobs.push(pending_at(1));
+        let expect = JobExpect::of(&q.jobs[0]);
+        let err = q
+            .update_job(
+                0,
+                &expect,
+                &JobPatch {
+                    text: Some("   ".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("empty"));
+        assert_eq!(q.jobs[0].text, "hi");
+    }
+
+    #[test]
+    fn fire_now_makes_the_job_due_and_resets_retries() {
+        let now = now_ms();
+        let mut q = Queue::default();
+        let mut j = job("sch_a", JobState::Pending, now + 86_400_000, 3, Some(now));
+        j.last_error = Some("boom".into());
+        q.jobs.push(j);
+        let expect = JobExpect::of(&q.jobs[0]);
+        let fired = q.fire_job_now(0, &expect).unwrap();
+        assert!(fired.due_ms <= now_ms());
+        assert_eq!(fired.attempts, 0);
+        assert_eq!(fired.last_attempt_ms, None);
+        assert_eq!(fired.last_error, None);
+        assert!(fired.due_for_delivery(now_ms()));
+    }
+
+    #[test]
+    fn requeue_copies_the_job_under_a_new_id() {
+        let mut q = Queue::default();
+        let mut src = job("sch_old", JobState::Failed, 1, 10, None);
+        src.text = "again".into();
+        src.session_id = "ses_keep".into();
+        src.agent = Some("build".into());
+        src.model = Some(ModelRef {
+            provider: "p".into(),
+            id: "m".into(),
+        });
+        q.jobs.push(src);
+        let copy = q.requeue_job(0, 99).unwrap();
+        assert_ne!(copy.id, "sch_old");
+        assert_eq!(copy.state, JobState::Pending);
+        assert_eq!(copy.text, "again");
+        assert_eq!(copy.session_id, "ses_keep");
+        assert_eq!(copy.agent.as_deref(), Some("build"));
+        assert_eq!(copy.due_ms, 99);
+        assert_eq!(copy.attempts, 0);
+        assert_eq!(q.jobs.len(), 2);
+        assert_eq!(q.jobs[0].state, JobState::Failed);
+    }
+
+    #[test]
+    fn find_job_takes_exact_ids_and_unique_prefixes() {
+        let mut q = Queue::default();
+        q.jobs.push(job("sch_aaa1", JobState::Pending, 1, 0, None));
+        q.jobs.push(job("sch_bbb2", JobState::Pending, 1, 0, None));
+        assert_eq!(q.find_job("sch_aaa1").unwrap(), 0);
+        assert_eq!(q.find_job("sch_bbb").unwrap(), 1);
+        assert!(
+            q.find_job("sch_")
+                .unwrap_err()
+                .to_string()
+                .contains("matched 2")
+        );
+        assert!(q.find_job("nope").is_err());
+    }
+
+    #[test]
+    fn cancel_honours_an_expectation() {
+        let mut q = Queue::default();
+        q.jobs.push(pending_at(1));
+        let stale = JobExpect::of(&q.jobs[0]);
+        q.jobs[0].due_ms = 2;
+        assert!(q.cancel_job(0, Some(&stale)).is_err());
+        let fresh = JobExpect::of(&q.jobs[0]);
+        assert_eq!(q.cancel_job(0, Some(&fresh)).unwrap().id, "sch_a");
+        assert!(q.jobs.is_empty());
     }
 }

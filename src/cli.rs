@@ -12,16 +12,16 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use mdrv_oc as oc;
 
 use crate::commands::{
-    Output, PromptArgs, cmd_daemon, cmd_project_list, cmd_project_show, cmd_prompt_cancel,
-    cmd_prompt_list, cmd_session_export, cmd_session_import, cmd_session_inspect, cmd_session_list,
-    cmd_session_list_server, cmd_session_move, cmd_session_prompt, cmd_session_show,
-    cmd_session_sync, open_db,
+    EditArgs, Output, PromptArgs, cmd_daemon, cmd_project_list, cmd_project_show,
+    cmd_prompt_cancel, cmd_prompt_edit, cmd_prompt_list, cmd_session_export, cmd_session_import,
+    cmd_session_inspect, cmd_session_list, cmd_session_list_server, cmd_session_move,
+    cmd_session_prompt, cmd_session_show, cmd_session_sync, open_db,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,10 +56,11 @@ pub struct Cli {
     pub db: Option<PathBuf>,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Inspect or modify sessions.
     Session {
@@ -98,9 +99,24 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
+
+    /// Open the prompt queue on a terminal UI.
+    ///
+    /// The scheduled prompts, editable in place: `e` edits text/session/time,
+    /// `d` cancels, `f` fires now, `r` requeues a finished one, `/` filters,
+    /// `?` lists every key. Needs an interactive terminal — `mdrv-oc` with no
+    /// arguments opens it too. Scriptable equivalents live under
+    /// `session prompt`.
+    Tui {
+        /// OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the
+        /// running service's registration file).
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionCommand {
     /// List sessions, newest first.
     List {
@@ -360,6 +376,42 @@ pub enum PromptCommand {
         /// The job id shown by `session prompt list` (or a unique prefix).
         id: String,
     },
+
+    /// Change the text, target session, or due time of a pending prompt.
+    ///
+    /// The server is consulted for --session when it is reachable: a new id
+    /// must match exactly or by unique prefix, as at creation. With no server
+    /// the id is accepted unvalidated. Edits are refused for a job that is
+    /// being delivered right now, and for one that is already finished.
+    Edit {
+        /// The job id shown by `session prompt list` (or a unique prefix).
+        id: String,
+
+        /// Replacement prompt text.
+        #[arg(long, value_name = "TEXT", conflicts_with = "file")]
+        text: Option<String>,
+
+        /// Replacement prompt text read from this file ("-" = stdin).
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+
+        /// New target session: exact id or unique id prefix.
+        #[arg(short, long, value_name = "ID")]
+        session: Option<String>,
+
+        /// New due time (same forms as `session prompt --at`).
+        #[arg(long, value_name = "WHEN", conflicts_with = "in_")]
+        at: Option<String>,
+
+        /// New due time as a duration from now (90s, 45m, 2h, 1d).
+        #[arg(long = "in", value_name = "DURATION")]
+        in_: Option<String>,
+
+        /// OpenCode server URL override (else $MDRV_OC_SERVER_URL, else the
+        /// running service's registration file).
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -370,8 +422,11 @@ pub enum PromptCommand {
 /// means an `Err(e)` bubbles up and `main` prints it + exits non-zero.
 pub fn run(cli: Cli) -> Result<()> {
     let output = Output::from_flags(cli.json, cli.pretty, cli.quiet);
+    let Some(command) = cli.command else {
+        return cmd_bare(!output.is_json());
+    };
 
-    match cli.command {
+    match command {
         Command::Session { action } => match action {
             SessionCommand::List {
                 limit,
@@ -484,6 +539,26 @@ pub fn run(cli: Cli) -> Result<()> {
             } => match cmd {
                 Some(PromptCommand::List) => cmd_prompt_list(output)?,
                 Some(PromptCommand::Cancel { id }) => cmd_prompt_cancel(&id, output)?,
+                Some(PromptCommand::Edit {
+                    id,
+                    text,
+                    file,
+                    session,
+                    at,
+                    in_,
+                    url,
+                }) => cmd_prompt_edit(
+                    EditArgs {
+                        id,
+                        text,
+                        file,
+                        session,
+                        at,
+                        in_,
+                        url,
+                    },
+                    output,
+                )?,
                 None => cmd_session_prompt(PromptArgs {
                     text,
                     file,
@@ -512,8 +587,49 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Complete { what } => cmd_complete(cli.db.as_deref(), &what)?,
         Command::Daemon { once } => cmd_daemon(once)?,
+        Command::Tui { url } => {
+            // The console paints the terminal, so there is nothing to serialize.
+            if output.is_json() {
+                bail!(
+                    "`tui` draws to the terminal; drop --json/--pretty (or use `session prompt list`)"
+                );
+            }
+            cmd_tui(url)?
+        }
     }
     Ok(())
+}
+
+/// `mdrv-oc` with no arguments means "open the queue" on a terminal and the
+/// old help elsewhere, so shell snippets that only want to discover the CLI
+/// keep working. A JSON flag means the caller wants text back, so it gets the
+/// help instead of the console. `help` is still an explicit subcommand.
+fn cmd_bare(may_open_console: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    if may_open_console && std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        return cmd_tui(None);
+    }
+    let help = <Cli as clap::CommandFactory>::command().render_long_help();
+    eprint!("{help}");
+    std::process::exit(2);
+}
+
+fn cmd_tui(url: Option<String>) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        bail!(
+            "the TUI needs an interactive terminal (stdout is not one); try `session prompt list`"
+        );
+    }
+    #[cfg(feature = "tui")]
+    {
+        crate::tui::run(url)
+    }
+    #[cfg(not(feature = "tui"))]
+    {
+        let _ = url;
+        bail!("this build has the `tui` feature disabled; rebuild without --no-default-features")
+    }
 }
 
 // ---------------------------------------------------------------------------

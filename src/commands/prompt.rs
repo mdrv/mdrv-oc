@@ -217,6 +217,13 @@ fn parse_model(s: &str) -> Result<(String, String)> {
 }
 
 /// Queue the job, warn when no daemon is watching, and confirm.
+/// A due time already gone is legal: the daemon fires it once, immediately.
+fn warn_if_past(due_ms: i64) {
+    if due_ms < schedule::now_ms() {
+        eprintln!("⚠ that time has passed — the prompt fires on the next daemon tick, late");
+    }
+}
+
 fn schedule_job(
     target: &ServerSession,
     text: &str,
@@ -251,6 +258,7 @@ fn schedule_job(
         Ok(job.id.clone())
     })?;
 
+    warn_if_past(due_ms);
     if !schedule::daemon_running() {
         eprintln!(
             "⚠ no mdrv-oc daemon is running — the prompt will wait until you start one:\n  mdrv-oc daemon"
@@ -362,56 +370,157 @@ pub(crate) fn cmd_prompt_list(output: Output) -> Result<()> {
 pub(crate) fn cmd_prompt_cancel(id: &str, output: Output) -> Result<()> {
     // The closure must speak the library's error type (`oc::Error`); the
     // `?` at the call site converts it into anyhow for main.
-    let removed: String = Queue::with_locked(|q| {
-        let bad = |msg: String| oc::Error::InvalidInput { msg };
-        let idx = match q.jobs.iter().position(|j| j.id == id) {
-            Some(i) => i,
-            None => {
-                let prefix: Vec<usize> = q
-                    .jobs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, j)| j.id.starts_with(id))
-                    .map(|(i, _)| i)
-                    .collect();
-                match prefix.len() {
-                    1 => prefix[0],
-                    0 => return Err(bad(format!("no scheduled prompt matches {id:?}"))),
-                    _ => {
-                        return Err(bad(format!(
-                            "{id:?} matched {} jobs; use a longer prefix:\n{}",
-                            prefix.len(),
-                            prefix
-                                .iter()
-                                .take(8)
-                                .map(|&i| format!("  • {}", q.jobs[i].id))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        )));
-                    }
-                }
-            }
-        };
-        let job = &q.jobs[idx];
-        if !matches!(job.state, JobState::Pending | JobState::Delivering) {
-            return Err(bad(format!(
-                "job {} is already finished ({}); nothing to cancel",
-                job.id,
-                job.state_str()
-            )));
-        }
-        let removed = q.jobs.remove(idx);
-        Ok(format!(
-            "✗ cancelled {} → {} at {}",
-            removed.id,
-            removed.session_title.as_deref().unwrap_or("?"),
-            schedule::format_ms(removed.due_ms)
-        ))
+    let removed = Queue::with_locked(|q| {
+        let idx = q.find_job(id)?;
+        q.cancel_job(idx, None)
     })?;
+    let removed = format!(
+        "✗ cancelled {} → {} at {}",
+        removed.id,
+        removed.session_title.as_deref().unwrap_or("?"),
+        schedule::format_ms(removed.due_ms)
+    );
     output.emit(&serde_json::json!({ "cancelled": removed }), || {
         println!("{removed}")
     });
     Ok(())
+}
+
+/// `session prompt edit <id|prefix>` — change text, target session, or due
+/// time of a pending job. Every field is optional; at least one is required.
+pub(crate) struct EditArgs {
+    pub id: String,
+    pub text: Option<String>,
+    pub file: Option<std::path::PathBuf>,
+    pub session: Option<String>,
+    pub at: Option<String>,
+    pub in_: Option<String>,
+    pub url: Option<String>,
+}
+
+pub(crate) fn cmd_prompt_edit(args: EditArgs, output: Output) -> Result<()> {
+    use mdrv_oc::schedule::{JobExpect, JobPatch};
+
+    if args.text.is_none()
+        && args.file.is_none()
+        && args.session.is_none()
+        && args.at.is_none()
+        && args.in_.is_none()
+    {
+        bail!("nothing to edit: pass --text/--file, --session, or --at/--in");
+    }
+
+    // Parse the time before taking the queue lock so a typo fails fast.
+    let due_ms = if args.at.is_some() || args.in_.is_some() {
+        Some(schedule::parse_due(
+            args.at.as_deref(),
+            args.in_.as_deref(),
+            &jiff::Zoned::now(),
+        )?)
+    } else {
+        None
+    };
+
+    let text = match (&args.text, &args.file) {
+        (Some(text), _) => {
+            if text.trim().is_empty() {
+                bail!("prompt text is empty");
+            }
+            Some(text.clone())
+        }
+        (None, Some(path)) if path.as_os_str() == "-" => Some(read_stdin()?),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        ),
+        (None, None) => None,
+    };
+
+    let session = args
+        .session
+        .as_deref()
+        .map(|sel| resolve_session_swap(args.url.as_deref(), sel))
+        .transpose()?;
+
+    let mut changed: Vec<&str> = Vec::new();
+    if text.is_some() {
+        changed.push("text");
+    }
+    if session.is_some() {
+        changed.push("session");
+    }
+    if due_ms.is_some() {
+        changed.push("due");
+    }
+
+    let patch = JobPatch {
+        text,
+        session,
+        due_ms,
+    };
+    let updated = Queue::with_locked(|q| {
+        let idx = q.find_job(&args.id)?;
+        // The CLI read the job under the same lock, so this cannot be stale;
+        // `update_job` still enforces the in-flight and finished rules.
+        let expect = JobExpect::of(&q.jobs[idx]);
+        q.update_job(idx, &expect, &patch)
+    })?;
+
+    warn_if_past(updated.due_ms);
+    let summary = format!(
+        "✓ updated {} ({}): {} · due {}",
+        updated.id,
+        updated
+            .session_title
+            .as_deref()
+            .unwrap_or(&updated.session_id),
+        changed.join(", "),
+        schedule::format_ms(updated.due_ms)
+    );
+    output.emit(&serde_json::json!({ "updated": updated }), || {
+        println!("{summary}")
+    });
+    Ok(())
+}
+
+/// Resolve a new `--session` value for an edit: a running server makes it
+/// strict (exact id or unique prefix, as at creation); with no server the id
+/// is accepted unvalidated, because delivery retries and reports the failure.
+fn resolve_session_swap(url: Option<&str>, sel: &str) -> Result<oc::schedule::SessionSwap> {
+    let swap = |title| oc::schedule::SessionSwap {
+        id: sel.to_owned(),
+        title,
+    };
+    let ep = match server::resolve_endpoint(url) {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("⚠ no OpenCode server ({e:#}); accepting {sel:?} unvalidated");
+            return Ok(swap(None));
+        }
+    };
+    let all = server::sessions(&ep, 1000)?;
+    if let [one] = all.iter().filter(|s| s.id == sel).collect::<Vec<_>>()[..] {
+        return Ok(swap(one.title.clone()));
+    }
+    let prefix: Vec<_> = all.iter().filter(|s| s.id.starts_with(sel)).collect();
+    match prefix.len() {
+        1 => Ok(swap(prefix[0].title.clone())),
+        0 => {
+            eprintln!(
+                "⚠ no server session matches {sel:?} ({} known); accepted unvalidated",
+                all.len()
+            );
+            Ok(swap(None))
+        }
+        n => bail!(
+            "{sel:?} matched {n} sessions; use a longer prefix:\n{}",
+            prefix
+                .iter()
+                .take(8)
+                .map(|s| format!("  • {}", display_id_title(s)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
 }
 
 fn first_line(s: &str, max: usize) -> String {

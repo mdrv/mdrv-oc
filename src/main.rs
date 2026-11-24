@@ -15,6 +15,8 @@
 
 mod cli;
 mod commands;
+#[cfg(feature = "tui")]
+mod tui;
 
 use clap::Parser;
 use cli::{Cli, run};

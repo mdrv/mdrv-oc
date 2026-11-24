@@ -13,7 +13,9 @@
 name = "mdrv-oc"
 version = "0.2.4"
 edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
-rust-version = "1.89"     # MSRV — std::fs file locking (schedule queue) landed in 1.89.
+# MSRV — the TUI's framework, Native Shell, needs 1.97. `--no-default-features`
+# builds the CLI alone, but one MSRV covers both so it follows the higher one.
+rust-version = "1.97"
 authors = ["Umar Alfarouk <medrivia@gmail.com>"]
 license = "MIT"
 description = "Inspect and manipulate the OpenCode SQLite database (sessions, projects)"
@@ -37,7 +39,6 @@ path = "src/main.rs"
 # `clap` with the `derive` feature = define the CLI with plain Rust structs +
 # `#[derive(Parser)]` attributes. Mirrors `mdrv-ink`.
 clap = { version = "4.6.1", features = ["derive"] }
-
 # `rusqlite` = the standard Rust binding to SQLite. We enable `bundled` so the
 # build compiles its own SQLite (libsqlite3-sys) — no system libsqlite3 needed,
 # which makes the binary self-contained and the version predictable. OpenCode
@@ -71,6 +72,46 @@ jiff = "0.2"
 #
 # Queue/daemon locking needs no crate: Rust ≥1.89 ships file locks in std.
 ureq = "3"
+
+# -- TUI (`--no-default-features` builds the CLI without any of these) --------
+#
+# Native Shell draws the scheduler view on a terminal's Cell grid. It is not a
+# TUI library but a cross-platform UI framework whose terminal backend is what
+# we want, so future GUI/web surfaces reuse the same components. Versions are
+# pinned exactly: pre-1.0, and the surface API moves between minors.
+# `default-features = false` leaves QuickJS/TSX, the websocket client, the
+# self-updater and HTTP `fetch` out; we write Rust components only.
+nsh-platform-tui = { optional = true, version = "=0.6.1", default-features = false, features = [
+    "run-app",
+] }
+nsh-core = { optional = true, version = "=0.6.1", default-features = false }
+# `nsh-platform-tui` turns on nsh-base's editor/emoji/highlight/plot suite
+# itself; we only need it for the UI registry so it stays as they declare it.
+nsh-base = { optional = true, version = "=0.6.1", default-features = false }
+# The terminal transport: ratatui's Cell backend over crossterm, the same pair
+# the framework's own host uses. `use-dev-tty` keeps the reader from spinning
+# on EOF.
+ratatui-core = { version = "0.1.2", optional = true }
+ratatui-crossterm = { version = "0.1.2", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+crossterm = { version = "0.29", optional = true, features = ["use-dev-tty"] }
+
+[target.'cfg(windows)'.dependencies]
+crossterm = { version = "0.29", optional = true }
+
+[features]
+default = ["tui"]
+tui = [
+    "dep:nsh-platform-tui",
+    "dep:nsh-core",
+    "dep:nsh-base",
+    "dep:ratatui-core",
+    "dep:ratatui-crossterm",
+    "dep:crossbeam-channel",
+    "dep:crossterm",
+]
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"   # coloured diff output in failing tests

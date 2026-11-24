@@ -170,9 +170,23 @@ mdrv-oc daemon                        # foreground watcher (ctrl-c to stop)
 
 # housekeeping
 mdrv-oc session prompt list           # pending first, then delivered/failed
+mdrv-oc session prompt edit sch_21d --in 2h --text "new wording"  # retime/rewrite
 mdrv-oc session prompt cancel sch_21d # id or unique prefix
 mdrv-oc session list --server         # sessions from the server, not the DB
 ```
+
+### Queue console (`mdrv-oc tui`)
+
+`mdrv-oc tui` (or bare `mdrv-oc` on a terminal) opens the queue in an
+interactive console: `e` edits the prompt, session and due time in place, `d`
+cancels after a `y` confirm, `f` fires now, `r` requeues a finished prompt as a
+new one, `y` copies the job id (OSC 52), `/` filters and `?` lists every key.
+Edits parse the same `--at`/`--in` grammar as the CLI, and every write is
+guarded against a concurrent edit (`queue changed since it was loaded` instead
+of last-write-wins); a job the daemon is delivering right now is refused until
+it lands. The list needs an interactive stdin and stdout — scripts and pipes
+still want `session prompt list`. Cross-platform details and the terminal
+compatibility notes live in [docs/tui.md](docs/tui.md).
 
 - **Server discovery needs no config:** mdrv-oc reads the running service's
   registration file (`$XDG_STATE_HOME/opencode/service.json` — url + password,
@@ -193,8 +207,11 @@ mdrv-oc session list --server         # sessions from the server, not the DB
 - **Agent/model switching is opt-in**: `--agent NAME` / `--model PROVIDER/ID`
   switch the target session right before the prompt; otherwise the session
   keeps its current setup (no hardcoded model map).
-- Quirk: a prompt whose *first word* is literally `list` or `cancel` parses as
-  a subcommand — pass that text via `--file` instead.
+- Quirk: a prompt whose *first word* is literally `list`, `cancel` or `edit`
+  parses as a subcommand — pass that text via `--file` instead.
+- `session prompt edit` takes its text from `--text`, `--file`/`-`, and changes
+  only what you pass; a past due time is accepted with a warning (it fires on
+  the next daemon tick).
 
 - Like upstream import, an imported session is **re-anchored to the project of
   your current working directory** — the original machine's paths are ignored,
