@@ -11,7 +11,7 @@
 
 [package]
 name = "mdrv-oc"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"          # Rust 2024 edition (stabilized in rustc 1.85). Latest stable.
 # MSRV — the TUI's framework, Native Shell, needs 1.97. `--no-default-features`
 # builds the CLI alone, but one MSRV covers both so it follows the higher one.
